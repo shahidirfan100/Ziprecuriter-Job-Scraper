@@ -1,7 +1,7 @@
 // src/main.js
 // ESM + Node 22 + Apify SDK v3 + Crawlee v3 (CheerioCrawler)
-// Prefers startUrl (ZipRecruiter search/list URL). Falls back to keyword/location only if startUrl missing.
-// Robust pagination + optional detail scraping + proxy + anti-bot headers (defensive against undefined gotOptions/requestOptions).
+// ZipRecruiter scraper that prefers a direct listing URL (startUrl), supports pagination,
+// optional detail scraping, proxy, sessions, and defensive anti-bot headers (no invalid options).
 
 import { Actor, log } from 'apify';
 import { CheerioCrawler, Dataset } from 'crawlee';
@@ -237,19 +237,11 @@ const crawler = new CheerioCrawler({
     useSessionPool: true,
     persistCookiesPerSession: true,
 
-    // Generate realistic headers automatically
-    headerGeneratorOptions: {
-        browsers: ['chrome'],
-        devices: ['desktop'],
-        operatingSystems: ['windows'],
-    },
-
-    // DEFENSIVE preNavigation hook — handles both gotOptions and requestOptions being undefined
+    // Defensive preNavigation hook: set realistic headers no matter which options object Crawlee uses
     preNavigationHooks: [
         async (ctx) => {
             const { request, session } = ctx;
 
-            // Reuse a per-session UA (simple static UA is fine; headerGenerator also sets one)
             const ua = session?.userData?.ua || 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Safari/537.36';
             if (session && !session.userData.ua) session.userData.ua = ua;
 
@@ -264,14 +256,12 @@ const crawler = new CheerioCrawler({
                 'dnt': '1',
             };
 
-            // Try all possible places Crawlee might read headers from
             if (ctx.gotOptions) {
                 ctx.gotOptions.headers = { ...(ctx.gotOptions.headers || {}), ...headers };
             }
             if (ctx.requestOptions) {
                 ctx.requestOptions.headers = { ...(ctx.requestOptions.headers || {}), ...headers };
             }
-            // Fallback: attach to request object so downstream has them
             request.headers = { ...(request.headers || {}), ...headers };
 
             if (downloadIntervalMs) await sleep(downloadIntervalMs);
@@ -361,8 +351,4 @@ Input example:
   "proxyConfiguration": { "useApifyProxy": true, "apifyProxyGroups": ["RESIDENTIAL"] },
   "downloadIntervalMs": 250
 }
-
-Notes on “guest gate”:
-- ZipRecruiter sometimes shows a sign-in/overlay on detail pages, but the server-rendered HTML still contains job content.
-- With HTTP-only scraping + sessions + realistic headers, you can parse that content without a full browser.
 */
