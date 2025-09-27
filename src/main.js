@@ -1,10 +1,6 @@
 // src/main.js
-// ZipRecruiter — HTTP-only (CheerioCrawler) with strong anti-block hardening.
-// - Per-session UA + sticky residential proxy
-// - Retire session on 403 and bot pages
-// - Referer chaining (list -> list, list -> detail)
-// - Optional detail skipping to reduce block risk
-// - Conservative concurrency + jitter
+// ZipRecruiter — HTTP-only (CheerioCrawler) with anti-block hardening.
+// Compatible with Crawlee v3 that does NOT support `postResponseHooks`.
 
 import { Actor, log } from 'apify';
 import { CheerioCrawler, Dataset } from 'crawlee';
@@ -15,13 +11,11 @@ const STR = (x) => (x ?? '').toString().trim();
 const CLEAN = (s) => STR(s).replace(/\s+/g, ' ').trim();
 
 const UA_POOL = [
-  // modern, plausible desktop UAs; rotated per session
   'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36',
   'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
   'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:122.0) Gecko/20100101 Firefox/122.0',
   'Mozilla/5.0 (Macintosh; Intel Mac OS X 13_6) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.6 Safari/605.1.15',
 ];
-
 const pickUA = () => UA_POOL[Math.floor(Math.random() * UA_POOL.length)];
 
 const parseSalary = (txt) => {
@@ -53,7 +47,7 @@ const extractJsonLd = ($) => {
         const arr = Array.isArray(data) ? data : [data];
         const jp = arr.find((x) => x['@type'] === 'JobPosting');
         if (jp) return jp;
-      } catch { /* ignore */ }
+      } catch {}
     }
   } catch {}
   return null;
@@ -81,7 +75,6 @@ const findNextPage = ($, baseUrl) => {
   });
   if (best) return best.url;
 
-  // heuristic increment
   cur.searchParams.set('p', String(curP + 1));
   return cur.href;
 };
@@ -165,15 +158,20 @@ const scrapeDetail = ($, loadedUrl) => {
   const jp = extractJsonLd($);
   if (jp) {
     out.jsonld = jp;
+
+    // surface key JSON-LD fields even when DOM is blocked/minimal
     if (!out.title && jp.title) out.title = CLEAN(jp.title);
     if (!out.company && jp.hiringOrganization?.name) out.company = CLEAN(jp.hiringOrganization.name);
-    if (!out.description_html && jp.description) out.description_html = jp.description;
+
+    if (!out.description_html && jp.description) out.description_html = jp.description; // jsonld/description
+    if (jp.datePosted) out.date_posted_iso = jp.datePosted;                              // jsonld/datePosted
+    if (jp.directApply !== undefined) out.direct_apply = Boolean(jp.directApply);        // jsonld/directApply
+
     if (!out.employment_type && jp.employmentType) out.employment_type = jp.employmentType;
     if (!out.location && jp.jobLocation?.address) {
       const a = jp.jobLocation.address;
       out.location = CLEAN([a.addressLocality, a.addressRegion, a.addressCountry].filter(Boolean).join(', '));
     }
-    if (jp.datePosted) out.date_posted_iso = jp.datePosted;
     if (jp.validThrough) out.valid_through_iso = jp.validThrough;
     if (jp.baseSalary) out.base_salary = jp.baseSalary;
   }
@@ -190,12 +188,12 @@ const {
   keyword = 'Admin',
   location = '',
   results_wanted = 100,
-  collect_details = true,        // set false to avoid detail-page 403s if needed
-  maxConcurrency = 4,            // conservative
-  maxRequestRetries = 2,         // retire sessions quickly
+  collect_details = true,        // set to false to avoid detail-page 403s
+  maxConcurrency = 3,            // conservative
+  maxRequestRetries = 2,
   proxyConfiguration = { useApifyProxy: true, apifyProxyGroups: ['RESIDENTIAL'] },
   requestHandlerTimeoutSecs = 35,
-  downloadIntervalMs = 350,      // jitter to reduce 403s
+  downloadIntervalMs = 450,      // jitter to reduce 403s
 } = input;
 
 const proxyConfig = await Actor.createProxyConfiguration(proxyConfiguration);
@@ -222,37 +220,15 @@ const crawler = new CheerioCrawler({
   persistCookiesPerSession: true,
   sessionPoolOptions: {
     maxPoolSize: 40,
-    sessionOptions: { maxUsageCount: 25 }, // rotate even if not blocked
+    sessionOptions: { maxUsageCount: 25 },
   },
 
-  // 403/bot-page detector BEFORE handler runs
-  postResponseHooks: [
-    async ({ session, response, body, request }) => {
-      // Hard 403 from server
-      if (response?.statusCode === 403) {
-        log.warning(`403 on ${request.url} — retiring session ${session?.id}`);
-        if (session) session.markBad();
-        throw new Error('Blocked (403)');
-      }
-      // Soft bot pages (HTML says “Request blocked” / “Access Denied” / “verify you are human”)
-      const text = typeof body === 'string' ? body : '';
-      if (text) {
-        const lc = text.toLowerCase();
-        if (lc.includes('request blocked') || lc.includes('access denied') || lc.includes('verify you are a human')) {
-          log.warning(`Bot page on ${request.url} — retiring session ${session?.id}`);
-          if (session) session.markBad();
-          throw new Error('Blocked (bot page)');
-        }
-      }
-    },
-  ],
-
-  // Set realistic headers & sticky proxy session per Crawlee session; add referer chaining; pace requests
+  // Header + proxy session + referer + pacing
   preNavigationHooks: [
     async (ctx) => {
       const { request, session, proxyInfo } = ctx;
 
-      // Attach sticky Apify proxy session per Crawlee session id
+      // Sticky Apify proxy session per Crawlee session id
       if (proxyInfo?.isApifyProxy && session?.id) {
         request.proxy = { ...(request.proxy || {}), session: session.id };
       }
@@ -261,8 +237,7 @@ const crawler = new CheerioCrawler({
       if (session && !session.userData.ua) session.userData.ua = pickUA();
       const ua = session?.userData?.ua || pickUA();
 
-      // Referer chaining: detail pages refer to their list; next list refers to previous page
-      const referer = request.userData?.referer || 'https://www.google.com/';
+      const referer = request.userData?.referer || 'https://www.ziprecruiter.com/';
 
       const headers = {
         'user-agent': ua,
@@ -276,7 +251,6 @@ const crawler = new CheerioCrawler({
         'referer': referer,
       };
 
-      // Apply headers defensively on any options object Crawlee may use
       if (ctx.gotOptions) ctx.gotOptions.headers = { ...(ctx.gotOptions.headers || {}), ...headers };
       if (ctx.requestOptions) ctx.requestOptions.headers = { ...(ctx.requestOptions.headers || {}), ...headers };
       request.headers = { ...(request.headers || {}), ...headers };
@@ -286,13 +260,28 @@ const crawler = new CheerioCrawler({
     },
   ],
 
-  requestHandler: async ({ request, $, enqueueLinks, session }) => {
+  requestHandler: async (ctx) => {
+    const { request, $, enqueueLinks, session, response } = ctx;
     const { label } = request.userData;
+
+    // --- BLOCK/403 DETECTOR (moved from postResponseHooks) ---
+    if (response?.statusCode === 403) {
+      log.warning(`403 on ${request.url} — retiring session ${session?.id}`);
+      if (session) session.markBad();
+      throw new Error('Blocked (403)');
+    }
+    // bot/blocked HTML indicators
+    const bodyText = ($('body').text() || '').toLowerCase();
+    if (bodyText.includes('request blocked') || bodyText.includes('access denied') || bodyText.includes('verify you are a human')) {
+      log.warning(`Bot page on ${request.url} — retiring session ${session?.id}`);
+      if (session) session.markBad();
+      throw new Error('Blocked (bot page)');
+    }
+    // --------------------------------------------------------
 
     if (!label || label === 'LIST') {
       const baseUrl = request.loadedUrl ?? request.url;
 
-      // SCRAPE CARDS
       const cards = scrapeCards($, baseUrl);
       log.info(`LIST ${baseUrl} -> ${cards.length} cards`);
 
@@ -315,7 +304,6 @@ const crawler = new CheerioCrawler({
         }
       }
 
-      // PAGINATION
       if (pushed < results_wanted) {
         const nextUrl = findNextPage($, baseUrl);
         if (nextUrl && nextUrl !== baseUrl) {
@@ -346,7 +334,7 @@ const crawler = new CheerioCrawler({
 
   failedRequestHandler: async ({ request, error, session }) => {
     log.warning(`FAILED ${request.url}: ${error?.message || error}`);
-    if (session) session.markBad(); // ensure bad identities are retired
+    if (session) session.markBad();
     await Dataset.pushData({
       type: 'error',
       url: request.url,
@@ -364,18 +352,17 @@ log.info(`Done. Total jobs pushed: ${pushed}`);
 await Actor.exit();
 
 /*
-Tips if you still see some 403s (normal on ZR, but recoverable with rotation):
-- Lower maxConcurrency to 2–3 and raise downloadIntervalMs to 500–800.
-- Ensure Apify residential proxy is enabled; avoid datacenter IPs.
-- If a specific geo blocks, set your Apify proxy country to US and keep sticky sessions on.
-
+If you still see sporadic blocks:
+- Set "collect_details": false (volume-first; JSON-LD is often present on list cards/partials).
+- Lower "maxConcurrency" to 2 and increase "downloadIntervalMs" to 600–900.
+- Keep Apify RESIDENTIAL proxies; avoid datacenter pools.
 Input example:
 {
   "startUrl": "https://www.ziprecruiter.com/Jobs/Admin",
   "results_wanted": 60,
   "collect_details": false,
   "proxyConfiguration": { "useApifyProxy": true, "apifyProxyGroups": ["RESIDENTIAL"] },
-  "maxConcurrency": 3,
-  "downloadIntervalMs": 500
+  "maxConcurrency": 2,
+  "downloadIntervalMs": 700
 }
 */
