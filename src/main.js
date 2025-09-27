@@ -1,6 +1,6 @@
 // src/main.js
-// ZipRecruiter — HTTP-only (CheerioCrawler) with anti-block hardening.
-// Compatible with Crawlee v3 that does NOT support `postResponseHooks`.
+// ZipRecruiter — HTTP-only (CheerioCrawler) with cookie warmup, slug fix, anti-block hardening.
+// Compatible with Crawlee v3.
 
 import { Actor, log } from 'apify';
 import { CheerioCrawler, Dataset } from 'crawlee';
@@ -31,6 +31,7 @@ const parseSalary = (txt) => {
   };
   return { raw: s, min: toNum(m[1], m[2]), max: toNum(m[3], m[4]), period: (m[5] || '').toLowerCase() || null };
 };
+
 const guessPosted = (txt) => {
   const s = CLEAN(txt || '');
   const m = s.match(/(\d+)\s+(day|days|hour|hours|minute|minutes|week|weeks|month|months)\s+ago/i);
@@ -158,8 +159,6 @@ const scrapeDetail = ($, loadedUrl) => {
   const jp = extractJsonLd($);
   if (jp) {
     out.jsonld = jp;
-
-    // surface key JSON-LD fields even when DOM is blocked/minimal
     if (!out.title && jp.title) out.title = CLEAN(jp.title);
     if (!out.company && jp.hiringOrganization?.name) out.company = CLEAN(jp.hiringOrganization.name);
 
@@ -180,33 +179,62 @@ const scrapeDetail = ($, loadedUrl) => {
   return out;
 };
 
+// -------- URL helpers: build/canonicalize/fallback --------
+
+const looksLikeBadSlug = (u) => {
+  try {
+    const url = new URL(u);
+    if (!/\/Jobs\/?/i.test(url.pathname)) return false;
+    const parts = url.pathname.split('/').filter(Boolean);
+    const last = parts[parts.length - 1] || '';
+    // If last part has less than 3 letters or no vowels, it's likely a typo slug
+    return last && last.length < 3 || (!/[aeiou]/i.test(last) && last.length < 8);
+  } catch { return false; }
+};
+
+const buildJobsUrl = (kw, loc) => {
+  const slug = (kw || 'Jobs').trim().replace(/\s+/g, '-').replace(/[^A-Za-z0-9-]/g, '');
+  let path = `/${encodeURIComponent(slug)}`;
+  if (loc && loc.trim()) path += `/-in-${encodeURIComponent(loc.trim())}`;
+  return `https://www.ziprecruiter.com/Jobs${path}`;
+};
+
+const buildCandidateSearchUrl = (kw, loc) => {
+  const u = new URL('https://www.ziprecruiter.com/candidate/search');
+  if (kw && kw.trim()) u.searchParams.set('search', kw.trim());
+  if (loc && loc.trim()) u.searchParams.set('location', loc.trim());
+  return u.href;
+};
+
+// ---------------------------
+// Main
+// ---------------------------
+
 await Actor.init();
 
 const input = (await Actor.getInput()) || {};
 const {
   startUrl,
-  keyword = 'Admin',
+  keyword = 'Administrative Assistant',
   location = '',
   results_wanted = 100,
-  collect_details = true,        // set to false to avoid detail-page 403s
-  maxConcurrency = 3,            // conservative
+  collect_details = true,
+  maxConcurrency = 2,             // conservative (ZR is sensitive)
   maxRequestRetries = 2,
-  proxyConfiguration = { useApifyProxy: true, apifyProxyGroups: ['RESIDENTIAL'] },
+  proxyConfiguration = { useApifyProxy: true, apifyProxyGroups: ['RESIDENTIAL'], countryCode: 'US' },
   requestHandlerTimeoutSecs = 35,
-  downloadIntervalMs = 450,      // jitter to reduce 403s
+  downloadIntervalMs = 650,       // gentle pacing + jitter
 } = input;
 
 const proxyConfig = await Actor.createProxyConfiguration(proxyConfiguration);
 
-const buildStartUrl = (kw, loc) => {
-  const searchSlug = kw ? kw.trim().replace(/\s+/g, '-').replace(/[^A-Za-z0-9-]/g, '') : 'Jobs';
-  let path = `/${encodeURIComponent(searchSlug)}`;
-  if (loc && loc.trim()) path += `/-in-${encodeURIComponent(loc.trim())}`;
-  return `https://www.ziprecruiter.com/Jobs${path}`;
-};
-
-const START_URL = startUrl?.trim() ? startUrl.trim() : buildStartUrl(keyword, location);
-log.info(`ZipRecruiter from: ${START_URL} | details: ${collect_details ? 'ON' : 'OFF'} | target: ${results_wanted}`);
+// Decide effective start URL, repair typos, and have a fallback
+let START_URL = startUrl?.trim() || buildJobsUrl(keyword, location);
+if (looksLikeBadSlug(START_URL)) {
+  log.warning(`Start slug looks suspicious -> using candidate search instead`);
+  START_URL = buildCandidateSearchUrl(keyword, location);
+}
+log.info(`ZipRecruiter start: ${START_URL} | details: ${collect_details ? 'ON' : 'OFF'} | target: ${results_wanted}`);
 
 let pushed = 0;
 
@@ -219,11 +247,11 @@ const crawler = new CheerioCrawler({
   useSessionPool: true,
   persistCookiesPerSession: true,
   sessionPoolOptions: {
-    maxPoolSize: 40,
-    sessionOptions: { maxUsageCount: 25 },
+    maxPoolSize: 30,
+    sessionOptions: { maxUsageCount: 20 },
   },
 
-  // Header + proxy session + referer + pacing
+  // Headers + sticky proxy + referer + pacing; also cookie warmup will benefit from this too
   preNavigationHooks: [
     async (ctx) => {
       const { request, session, proxyInfo } = ctx;
@@ -237,7 +265,7 @@ const crawler = new CheerioCrawler({
       if (session && !session.userData.ua) session.userData.ua = pickUA();
       const ua = session?.userData?.ua || pickUA();
 
-      const referer = request.userData?.referer || 'https://www.ziprecruiter.com/';
+      const referer = request.userData?.referer || 'https://www.google.com/';
 
       const headers = {
         'user-agent': ua,
@@ -249,14 +277,16 @@ const crawler = new CheerioCrawler({
         'sec-fetch-site': 'same-origin',
         'dnt': '1',
         'referer': referer,
+        // some CDNs key off these:
+        'cache-control': 'no-cache',
+        'pragma': 'no-cache',
       };
 
       if (ctx.gotOptions) ctx.gotOptions.headers = { ...(ctx.gotOptions.headers || {}), ...headers };
       if (ctx.requestOptions) ctx.requestOptions.headers = { ...(ctx.requestOptions.headers || {}), ...headers };
       request.headers = { ...(request.headers || {}), ...headers };
 
-      // gentle pacing
-      if (downloadIntervalMs) await sleep(downloadIntervalMs + Math.floor(Math.random() * 200));
+      if (downloadIntervalMs) await sleep(downloadIntervalMs + Math.floor(Math.random() * 250));
     },
   ],
 
@@ -264,20 +294,25 @@ const crawler = new CheerioCrawler({
     const { request, $, enqueueLinks, session, response } = ctx;
     const { label } = request.userData;
 
-    // --- BLOCK/403 DETECTOR (moved from postResponseHooks) ---
+    // 403/bot-page detection
     if (response?.statusCode === 403) {
       log.warning(`403 on ${request.url} — retiring session ${session?.id}`);
       if (session) session.markBad();
       throw new Error('Blocked (403)');
     }
-    // bot/blocked HTML indicators
     const bodyText = ($('body').text() || '').toLowerCase();
     if (bodyText.includes('request blocked') || bodyText.includes('access denied') || bodyText.includes('verify you are a human')) {
       log.warning(`Bot page on ${request.url} — retiring session ${session?.id}`);
       if (session) session.markBad();
       throw new Error('Blocked (bot page)');
     }
-    // --------------------------------------------------------
+
+    // Warmup handler: do nothing except succeed; then enqueue the real start with good referer
+    if (label === 'WARMUP') {
+      log.info(`Warmup ok for session ${session?.id}`);
+      await enqueueLinks({ urls: [START_URL], userData: { label: 'LIST', referer: request.url } });
+      return;
+    }
 
     if (!label || label === 'LIST') {
       const baseUrl = request.loadedUrl ?? request.url;
@@ -345,24 +380,28 @@ const crawler = new CheerioCrawler({
   },
 });
 
-// Seed
-await crawler.run([{ url: START_URL, userData: { label: 'LIST', referer: 'https://www.ziprecruiter.com/' } }]);
+// Seed with a same-session cookie warmup, then the real list page.
+// Warmup → sets cookies (bm_sz / akamai style) with same proxy+session before listings.
+await crawler.run([
+  { url: 'https://www.ziprecruiter.com/', userData: { label: 'WARMUP', referer: 'https://www.google.com/' } },
+]);
 
 log.info(`Done. Total jobs pushed: ${pushed}`);
 await Actor.exit();
 
 /*
-If you still see sporadic blocks:
-- Set "collect_details": false (volume-first; JSON-LD is often present on list cards/partials).
-- Lower "maxConcurrency" to 2 and increase "downloadIntervalMs" to 600–900.
-- Keep Apify RESIDENTIAL proxies; avoid datacenter pools.
-Input example:
+If you still see initial 403s:
+- Keep "candidate search" fallback by providing only "keyword" + "location" (omit startUrl) — it's friendlier than SEO slugs.
+- Lower "maxConcurrency" to 1 and set "downloadIntervalMs" to 900 for the first run.
+- Ensure Apify RESIDENTIAL proxies with countryCode "US".
+Input examples:
 {
-  "startUrl": "https://www.ziprecruiter.com/Jobs/Admin",
-  "results_wanted": 60,
+  "keyword": "Automotive",
+  "location": "Virginia, US",
+  "results_wanted": 40,
   "collect_details": false,
-  "proxyConfiguration": { "useApifyProxy": true, "apifyProxyGroups": ["RESIDENTIAL"] },
-  "maxConcurrency": 2,
-  "downloadIntervalMs": 700
+  "maxConcurrency": 1,
+  "downloadIntervalMs": 900,
+  "proxyConfiguration": { "useApifyProxy": true, "apifyProxyGroups": ["RESIDENTIAL"], "countryCode": "US" }
 }
 */
