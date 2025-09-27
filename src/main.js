@@ -1,12 +1,15 @@
 // src/main.js
-// ZipRecruiter — HTTP-only (CheerioCrawler) with cookie warmup, slug fix, anti-block hardening.
-// Compatible with Crawlee v3.
+// ZipRecruiter — HTTP-only (CheerioCrawler) with robust pagination to reach target counts.
+// - Global de-dup across pages
+// - Paginate until SEEN >= results_wanted (not only pushed)
+// - Works for /Jobs/* (?p=) and /candidate/search (?page=)
+// - Cookie warmup, sticky residential proxy, per-session UA, referer chaining
+// - JSON-LD surfaced (date_posted_iso, description_html, direct_apply)
 
 import { Actor, log } from 'apify';
 import { CheerioCrawler, Dataset } from 'crawlee';
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-const ABS = (href, base) => { try { return new URL(href, base).href; } catch { return null; } };
 const STR = (x) => (x ?? '').toString().trim();
 const CLEAN = (s) => STR(s).replace(/\s+/g, ' ').trim();
 
@@ -18,6 +21,25 @@ const UA_POOL = [
 ];
 const pickUA = () => UA_POOL[Math.floor(Math.random() * UA_POOL.length)];
 
+// ---------- URL helpers ----------
+const ABS = (href, base) => { try { return new URL(href, base).href; } catch { return null; } };
+
+// Make the same job URL canonical even if params order differs.
+// Keep important params like jid; drop tracking and fragments.
+const normalizeJobUrl = (u) => {
+  try {
+    const url = new URL(u);
+    url.hash = '';
+    // keep only a conservative allowlist of params
+    const keep = new Set(['jid', 'mid']);
+    const kept = new URLSearchParams();
+    for (const [k, v] of url.searchParams.entries()) if (keep.has(k)) kept.set(k, v);
+    url.search = kept.toString();
+    return url.href;
+  } catch { return u; }
+};
+
+// -------- extraction helpers --------
 const parseSalary = (txt) => {
   const s = CLEAN(txt || '');
   if (!s) return null;
@@ -54,32 +76,49 @@ const extractJsonLd = ($) => {
   return null;
 };
 
+// -------- pagination detection --------
 const findNextPage = ($, baseUrl) => {
+  // 1) rel=next
   let href = $('link[rel="next"]').attr('href');
   if (href) return ABS(href, baseUrl);
-  const a1 = $('a[rel="next"], a[aria-label="Next"], a[aria-label="next"]').attr('href');
-  if (a1) return ABS(a1, baseUrl);
 
+  // 2) a[rel/aria-label=Next]
+  const aNext = $('a[rel="next"], a[aria-label="Next"], a[aria-label="next"]').attr('href');
+  if (aNext) return ABS(aNext, baseUrl);
+
+  // 3) numeric controls; handle both ?p= and ?page=
   const cur = new URL(baseUrl);
-  const curP = Number(cur.searchParams.get('p') || '1') || 1;
+  const pageKeys = ['p', 'page'];
+  const getCur = () => {
+    for (const k of pageKeys) {
+      const n = Number(cur.searchParams.get(k) || '1');
+      if (n) return { key: k, val: n };
+    }
+    return { key: 'p', val: 1 };
+  };
+  const curInfo = getCur();
 
+  // pick the smallest page greater than current among anchors
   let best = null;
-  $('a[href*="?p="], a[href*="&p="]').each((_, a) => {
-    const h = $(a).attr('href');
-    const url = ABS(h, baseUrl);
+  $('a[href]').each((_, a) => {
+    const url = ABS($(a).attr('href'), baseUrl);
     if (!url) return;
     try {
       const u = new URL(url);
-      const p = Number(u.searchParams.get('p') || '0');
-      if (p > curP && (!best || p < best.p)) best = { p, url };
+      for (const key of pageKeys) {
+        const p = Number(u.searchParams.get(key) || '0');
+        if (p > curInfo.val && (!best || p < best.p)) best = { p, url };
+      }
     } catch {}
   });
   if (best) return best.url;
 
-  cur.searchParams.set('p', String(curP + 1));
-  return cur.href;
+  // 4) heuristic increment (try current key, then the other one)
+  const tryInc = (key) => { const u = new URL(baseUrl); u.searchParams.set(key, String((Number(u.searchParams.get(key) || '1') || 1) + 1)); return u.href; };
+  return cur.searchParams.has(curInfo.key) ? tryInc(curInfo.key) : tryInc(curInfo.key === 'p' ? 'page' : 'p');
 };
 
+// -------- card/detail scraping --------
 const scrapeCards = ($, baseUrl) => {
   const jobs = [];
   const LINK_SEL = [
@@ -91,7 +130,8 @@ const scrapeCards = ($, baseUrl) => {
 
   $(LINK_SEL).each((_, el) => {
     const $a = $(el);
-    const href = ABS($a.attr('href'), baseUrl);
+    const href0 = $a.attr('href');
+    const href = ABS(href0, baseUrl);
     if (!href) return;
     if (!/\/(c|job|jobs)\//i.test(href)) return;
 
@@ -128,8 +168,7 @@ const scrapeCards = ($, baseUrl) => {
     });
   });
 
-  const seen = new Set();
-  return jobs.filter((j) => j.url && !seen.has(j.url) && seen.add(j.url));
+  return jobs;
 };
 
 const scrapeDetail = ($, loadedUrl) => {
@@ -159,12 +198,13 @@ const scrapeDetail = ($, loadedUrl) => {
   const jp = extractJsonLd($);
   if (jp) {
     out.jsonld = jp;
+
     if (!out.title && jp.title) out.title = CLEAN(jp.title);
     if (!out.company && jp.hiringOrganization?.name) out.company = CLEAN(jp.hiringOrganization.name);
 
-    if (!out.description_html && jp.description) out.description_html = jp.description; // jsonld/description
-    if (jp.datePosted) out.date_posted_iso = jp.datePosted;                              // jsonld/datePosted
-    if (jp.directApply !== undefined) out.direct_apply = Boolean(jp.directApply);        // jsonld/directApply
+    if (!out.description_html && jp.description) out.description_html = jp.description;
+    if (jp.datePosted) out.date_posted_iso = jp.datePosted;
+    if (jp.directApply !== undefined) out.direct_apply = Boolean(jp.directApply);
 
     if (!out.employment_type && jp.employmentType) out.employment_type = jp.employmentType;
     if (!out.location && jp.jobLocation?.address) {
@@ -179,26 +219,13 @@ const scrapeDetail = ($, loadedUrl) => {
   return out;
 };
 
-// -------- URL helpers: build/canonicalize/fallback --------
-
-const looksLikeBadSlug = (u) => {
-  try {
-    const url = new URL(u);
-    if (!/\/Jobs\/?/i.test(url.pathname)) return false;
-    const parts = url.pathname.split('/').filter(Boolean);
-    const last = parts[parts.length - 1] || '';
-    // If last part has less than 3 letters or no vowels, it's likely a typo slug
-    return last && last.length < 3 || (!/[aeiou]/i.test(last) && last.length < 8);
-  } catch { return false; }
-};
-
+// -------- fallback URL builders --------
 const buildJobsUrl = (kw, loc) => {
   const slug = (kw || 'Jobs').trim().replace(/\s+/g, '-').replace(/[^A-Za-z0-9-]/g, '');
   let path = `/${encodeURIComponent(slug)}`;
   if (loc && loc.trim()) path += `/-in-${encodeURIComponent(loc.trim())}`;
   return `https://www.ziprecruiter.com/Jobs${path}`;
 };
-
 const buildCandidateSearchUrl = (kw, loc) => {
   const u = new URL('https://www.ziprecruiter.com/candidate/search');
   if (kw && kw.trim()) u.searchParams.set('search', kw.trim());
@@ -219,24 +246,25 @@ const {
   location = '',
   results_wanted = 100,
   collect_details = true,
-  maxConcurrency = 2,             // conservative (ZR is sensitive)
+  maxConcurrency = 2,
   maxRequestRetries = 2,
   proxyConfiguration = { useApifyProxy: true, apifyProxyGroups: ['RESIDENTIAL'], countryCode: 'US' },
   requestHandlerTimeoutSecs = 35,
-  downloadIntervalMs = 650,       // gentle pacing + jitter
+  downloadIntervalMs = 600,
+  preferCandidateSearch = false,     // set true to always use /candidate/search
 } = input;
 
 const proxyConfig = await Actor.createProxyConfiguration(proxyConfiguration);
 
-// Decide effective start URL, repair typos, and have a fallback
-let START_URL = startUrl?.trim() || buildJobsUrl(keyword, location);
-if (looksLikeBadSlug(START_URL)) {
-  log.warning(`Start slug looks suspicious -> using candidate search instead`);
-  START_URL = buildCandidateSearchUrl(keyword, location);
-}
+// Decide effective start URL
+let START_URL = startUrl?.trim()
+  || (preferCandidateSearch ? buildCandidateSearchUrl(keyword, location) : buildJobsUrl(keyword, location));
+
 log.info(`ZipRecruiter start: ${START_URL} | details: ${collect_details ? 'ON' : 'OFF'} | target: ${results_wanted}`);
 
 let pushed = 0;
+const SEEN_URLS = new Set();     // global de-dup across pages
+const QUEUED_DETAILS = new Set();// avoid re-enqueueing same detail
 
 const crawler = new CheerioCrawler({
   proxyConfiguration: proxyConfig,
@@ -251,22 +279,15 @@ const crawler = new CheerioCrawler({
     sessionOptions: { maxUsageCount: 20 },
   },
 
-  // Headers + sticky proxy + referer + pacing; also cookie warmup will benefit from this too
   preNavigationHooks: [
     async (ctx) => {
       const { request, session, proxyInfo } = ctx;
-
-      // Sticky Apify proxy session per Crawlee session id
       if (proxyInfo?.isApifyProxy && session?.id) {
         request.proxy = { ...(request.proxy || {}), session: session.id };
       }
-
-      // One UA per session
       if (session && !session.userData.ua) session.userData.ua = pickUA();
       const ua = session?.userData?.ua || pickUA();
-
       const referer = request.userData?.referer || 'https://www.google.com/';
-
       const headers = {
         'user-agent': ua,
         'accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
@@ -277,16 +298,13 @@ const crawler = new CheerioCrawler({
         'sec-fetch-site': 'same-origin',
         'dnt': '1',
         'referer': referer,
-        // some CDNs key off these:
         'cache-control': 'no-cache',
         'pragma': 'no-cache',
       };
-
       if (ctx.gotOptions) ctx.gotOptions.headers = { ...(ctx.gotOptions.headers || {}), ...headers };
       if (ctx.requestOptions) ctx.requestOptions.headers = { ...(ctx.requestOptions.headers || {}), ...headers };
       request.headers = { ...(request.headers || {}), ...headers };
-
-      if (downloadIntervalMs) await sleep(downloadIntervalMs + Math.floor(Math.random() * 250));
+      if (downloadIntervalMs) await sleep(downloadIntervalMs + Math.floor(Math.random() * 200));
     },
   ],
 
@@ -294,22 +312,21 @@ const crawler = new CheerioCrawler({
     const { request, $, enqueueLinks, session, response } = ctx;
     const { label } = request.userData;
 
-    // 403/bot-page detection
+    // basic block detection
     if (response?.statusCode === 403) {
-      log.warning(`403 on ${request.url} — retiring session ${session?.id}`);
+      log.warning(`403 on ${request.url} — retire session ${session?.id}`);
       if (session) session.markBad();
       throw new Error('Blocked (403)');
     }
     const bodyText = ($('body').text() || '').toLowerCase();
     if (bodyText.includes('request blocked') || bodyText.includes('access denied') || bodyText.includes('verify you are a human')) {
-      log.warning(`Bot page on ${request.url} — retiring session ${session?.id}`);
+      log.warning(`Bot page on ${request.url} — retire session ${session?.id}`);
       if (session) session.markBad();
       throw new Error('Blocked (bot page)');
     }
 
-    // Warmup handler: do nothing except succeed; then enqueue the real start with good referer
+    // WARMUP just sets cookies then moves on
     if (label === 'WARMUP') {
-      log.info(`Warmup ok for session ${session?.id}`);
       await enqueueLinks({ urls: [START_URL], userData: { label: 'LIST', referer: request.url } });
       return;
     }
@@ -317,32 +334,44 @@ const crawler = new CheerioCrawler({
     if (!label || label === 'LIST') {
       const baseUrl = request.loadedUrl ?? request.url;
 
+      // SCRAPE cards and register globally
       const cards = scrapeCards($, baseUrl);
-      log.info(`LIST ${baseUrl} -> ${cards.length} cards`);
+      let newAdded = 0;
 
       for (const card of cards) {
-        if (pushed >= results_wanted) break;
+        const norm = normalizeJobUrl(card.url);
+        if (SEEN_URLS.has(norm)) continue; // global dedupe
+        SEEN_URLS.add(norm);
+        newAdded++;
 
-        if (collect_details) {
-          await enqueueLinks({
-            urls: [card.url],
-            userData: { label: 'DETAIL', card, referer: baseUrl },
-          });
-        } else {
+        if (!collect_details) {
           await Dataset.pushData({
             source: 'ziprecruiter',
             scraped_at: new Date().toISOString(),
             search_url: START_URL,
             ...card,
+            url: norm,
           });
           pushed++;
+        } else {
+          if (!QUEUED_DETAILS.has(norm)) {
+            QUEUED_DETAILS.add(norm);
+            await enqueueLinks({
+              urls: [norm],
+              userData: { label: 'DETAIL', card, referer: baseUrl },
+            });
+          }
         }
+
+        if (SEEN_URLS.size >= results_wanted) break; // drive by SEEN count
       }
 
-      if (pushed < results_wanted) {
+      log.info(`LIST ${baseUrl} -> cards=${cards.length}, new=${newAdded}, SEEN=${SEEN_URLS.size}, pushed=${pushed}`);
+
+      // PAGINATION: continue while SEEN < target
+      if (SEEN_URLS.size < results_wanted) {
         const nextUrl = findNextPage($, baseUrl);
         if (nextUrl && nextUrl !== baseUrl) {
-          log.info(`NEXT -> ${nextUrl}`);
           await enqueueLinks({ urls: [nextUrl], userData: { label: 'LIST', referer: baseUrl } });
         } else {
           log.info('No next page detected.');
@@ -354,13 +383,13 @@ const crawler = new CheerioCrawler({
     if (label === 'DETAIL') {
       const base = request.loadedUrl ?? request.url;
       const detail = scrapeDetail($, base);
-
       await Dataset.pushData({
         source: 'ziprecruiter',
         scraped_at: new Date().toISOString(),
         search_url: START_URL,
         ...request.userData.card,
         ...detail,
+        url: normalizeJobUrl(base),
       });
       pushed++;
       return;
@@ -380,26 +409,26 @@ const crawler = new CheerioCrawler({
   },
 });
 
-// Seed with a same-session cookie warmup, then the real list page.
-// Warmup → sets cookies (bm_sz / akamai style) with same proxy+session before listings.
+// Seed with cookie warmup, then actual start (same session/proxy)
 await crawler.run([
   { url: 'https://www.ziprecruiter.com/', userData: { label: 'WARMUP', referer: 'https://www.google.com/' } },
 ]);
 
-log.info(`Done. Total jobs pushed: ${pushed}`);
+log.info(`Done. SEEN=${SEEN_URLS.size} pushed=${pushed}`);
 await Actor.exit();
 
 /*
-If you still see initial 403s:
-- Keep "candidate search" fallback by providing only "keyword" + "location" (omit startUrl) — it's friendlier than SEO slugs.
-- Lower "maxConcurrency" to 1 and set "downloadIntervalMs" to 900 for the first run.
-- Ensure Apify RESIDENTIAL proxies with countryCode "US".
-Input examples:
+Tips to guarantee 100:
+- Keep "collect_details": false for volume-first (then re-run with details if needed).
+- If a run still stalls near 50, set maxConcurrency=1 and downloadIntervalMs=900 temporarily to build the SEEN set.
+- Prefer "preferCandidateSearch": true for friendlier SSR pagination (uses ?page=).
+Input example:
 {
   "keyword": "Automotive",
   "location": "Virginia, US",
-  "results_wanted": 40,
+  "results_wanted": 100,
   "collect_details": false,
+  "preferCandidateSearch": true,
   "maxConcurrency": 1,
   "downloadIntervalMs": 900,
   "proxyConfiguration": { "useApifyProxy": true, "apifyProxyGroups": ["RESIDENTIAL"], "countryCode": "US" }
