@@ -4,7 +4,7 @@
 // - Paginate until SEEN >= results_wanted (not only pushed)
 // - Works for /Jobs/* (?p=) and /candidate/search (?page=)
 // - Cookie warmup, sticky residential proxy, per-session UA, referer chaining
-// - JSON-LD surfaced (date_posted_iso, description_html, direct_apply)
+// - JSON-LD surfaced (date_posted_iso, description_text, direct_apply)
 
 import { Actor, log } from 'apify';
 import { CheerioCrawler, Dataset } from 'crawlee';
@@ -12,6 +12,76 @@ import { CheerioCrawler, Dataset } from 'crawlee';
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const STR = (x) => (x ?? '').toString().trim();
 const CLEAN = (s) => STR(s).replace(/\s+/g, ' ').trim();
+const htmlToText = (html) => {
+  const raw = STR(html);
+  if (!raw) return null;
+  return CLEAN(raw.replace(/<[^>]*>/g, ' '));
+};
+const pickValue = (...values) => {
+  for (const val of values) {
+    if (val === undefined || val === null) continue;
+    if (typeof val === 'string') {
+      const str = CLEAN(val);
+      if (str) return str;
+    } else if (typeof val === 'number') {
+      return val;
+    } else if (typeof val === 'boolean') {
+      return val;
+    }
+  }
+  return null;
+};
+const toNumber = (value) => {
+  if (value === undefined || value === null) return null;
+  const num = Number(value);
+  return Number.isFinite(num) ? num : null;
+};
+const extractJobId = (url) => {
+  try {
+    return new URL(url).searchParams.get('jid') || null;
+  } catch {
+    return null;
+  }
+};
+const buildOutputRecord = ({ searchUrl, scrapedAt, url, referer, card = {}, detail = {} }) => {
+  const title = pickValue(detail.title, card.title);
+  const company = pickValue(detail.company, card.company);
+  const location = pickValue(detail.location, card.location);
+  const employmentType = pickValue(detail.employment_type, card.employment_type);
+  const description = pickValue(detail.description_text, card.description_text);
+  const postedText = pickValue(detail.posted_text, card.posted_text);
+  const postedRelative = pickValue(detail.posted_relative, card.posted_relative);
+  const salaryRaw = pickValue(detail.salary_raw, card.salary_raw);
+  const salaryMin = pickValue(detail.salary_min, card.salary_min);
+  const salaryMax = pickValue(detail.salary_max, card.salary_max);
+  const salaryPeriod = pickValue(detail.salary_period, card.salary_period);
+  const salaryCurrency = pickValue(detail.salary_currency, card.salary_currency);
+
+  return {
+    source: 'ziprecruiter',
+    scraped_at: scrapedAt,
+    search_url: searchUrl,
+    url,
+    job_id: extractJobId(url),
+    referer: referer || null,
+    title: title || null,
+    company: company || null,
+    location: location || null,
+    description: description || null,
+    employment_type: employmentType || null,
+    salary_raw: salaryRaw || null,
+    salary_min: salaryMin ?? null,
+    salary_max: salaryMax ?? null,
+    salary_period: salaryPeriod || null,
+    salary_currency: salaryCurrency || null,
+    posted_text: postedText || null,
+    posted_relative: postedRelative || null,
+    date_posted_iso: detail.date_posted_iso ?? null,
+    valid_through_iso: detail.valid_through_iso ?? null,
+    direct_apply: detail.direct_apply ?? null,
+    detail_url: detail.detail_url || null,
+  };
+};
 
 const UA_POOL = [
   'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36',
@@ -156,15 +226,21 @@ const scrapeCards = ($, baseUrl) => {
     const salMatch = textBlob.match(/\$\s?[\d.,]+(?:\s*[KM])?\s*-\s*\$\s?[\d.,]+(?:\s*[KM])?.{0,20}?(?:yr|hr|year|hour|annually)/i);
     if (salMatch) salaryRaw = salMatch[0];
 
+    const postedGuess = postedText ? guessPosted(postedText) : null;
+    const salaryParsed = salaryRaw ? parseSalary(salaryRaw) : null;
+
     jobs.push({
       url: href,
       title: title || null,
       company: company || null,
       location: location || null,
-      posted_text: postedText || null,
-      posted_guess: postedText ? guessPosted(postedText) : null,
-      salary: salaryRaw ? parseSalary(salaryRaw) : null,
       employment_type: employmentType || null,
+      posted_text: postedText || null,
+      posted_relative: postedGuess?.relative || null,
+      salary_raw: salaryParsed?.raw || salaryRaw || null,
+      salary_min: salaryParsed?.min ?? null,
+      salary_max: salaryParsed?.max ?? null,
+      salary_period: salaryParsed?.period || null,
     });
   });
 
@@ -189,30 +265,61 @@ const scrapeDetail = ($, loadedUrl) => {
   out.location = CLEAN($(locCandidates).first().text()) || null;
 
   const descNode = $('section.job_description, #job_description, .job_description, [data-testid="jobDescription"], article').first();
-  out.description_html = STR(descNode.html()) || null;
-  out.description_text = CLEAN(descNode.text()) || null;
+  const descriptionHtml = STR(descNode.html()) || null;
+  out.description_text = CLEAN(descNode.text()) || htmlToText(descriptionHtml);
 
   out.posted_text = CLEAN($('time[datetime], .posted, .posted-date, .t_posted').first().text()) || null;
   out.employment_type = CLEAN($('.employment-type, [data-employment-type]').first().text()) || null;
 
+  const salaryDetailText = CLEAN($('.salary, .compensation, .pay, [data-salary], .job_salary, .job-salary').first().text()) || null;
+  if (salaryDetailText) {
+    const parsed = parseSalary(salaryDetailText);
+    if (parsed) {
+      if (!out.salary_raw) out.salary_raw = parsed.raw;
+      if (parsed.min !== undefined && parsed.min !== null && toNumber(parsed.min) !== null) out.salary_min = parsed.min;
+      if (parsed.max !== undefined && parsed.max !== null && toNumber(parsed.max) !== null) out.salary_max = parsed.max;
+      if (parsed.period && !out.salary_period) out.salary_period = parsed.period;
+    }
+  }
+
+  if (out.posted_text) {
+    const detailPostedGuess = guessPosted(out.posted_text);
+    if (detailPostedGuess?.relative) out.posted_relative = detailPostedGuess.relative;
+  }
+
   const jp = extractJsonLd($);
   if (jp) {
-    out.jsonld = jp;
-
     if (!out.title && jp.title) out.title = CLEAN(jp.title);
     if (!out.company && jp.hiringOrganization?.name) out.company = CLEAN(jp.hiringOrganization.name);
-
-    if (!out.description_html && jp.description) out.description_html = jp.description;
-    if (jp.datePosted) out.date_posted_iso = jp.datePosted;
-    if (jp.directApply !== undefined) out.direct_apply = Boolean(jp.directApply);
-
-    if (!out.employment_type && jp.employmentType) out.employment_type = jp.employmentType;
+    if (!out.description_text && jp.description) out.description_text = htmlToText(jp.description);
+    if (!out.employment_type && jp.employmentType) out.employment_type = CLEAN(jp.employmentType);
     if (!out.location && jp.jobLocation?.address) {
       const a = jp.jobLocation.address;
       out.location = CLEAN([a.addressLocality, a.addressRegion, a.addressCountry].filter(Boolean).join(', '));
     }
+
+    if (jp.datePosted) out.date_posted_iso = jp.datePosted;
+    if (jp.directApply !== undefined) out.direct_apply = Boolean(jp.directApply);
     if (jp.validThrough) out.valid_through_iso = jp.validThrough;
-    if (jp.baseSalary) out.base_salary = jp.baseSalary;
+
+    if (jp.baseSalary) {
+      const base = jp.baseSalary;
+      const value = base && typeof base === 'object' ? base.value ?? base : {};
+      const salaryText = value && typeof value === 'object' ? (value.text ?? base.text ?? null) : (base.text ?? null);
+      if (salaryText && !out.salary_raw) out.salary_raw = CLEAN(salaryText);
+
+      const minCandidate = value && typeof value === 'object' ? (value.minValue ?? value.value ?? null) : null;
+      const maxCandidate = value && typeof value === 'object' ? (value.maxValue ?? null) : null;
+      const minNumber = toNumber(minCandidate);
+      const maxNumber = toNumber(maxCandidate);
+      if (minNumber !== null) out.salary_min = minNumber;
+      if (maxNumber !== null) out.salary_max = maxNumber;
+
+      const currency = value && typeof value === 'object' ? (value.currency ?? base.currency ?? null) : (base.currency ?? null);
+      if (currency) out.salary_currency = CLEAN(currency);
+      const unit = value && typeof value === 'object' ? (value.unitText ?? base.unitText ?? null) : (base.unitText ?? null);
+      if (unit) out.salary_period = CLEAN(unit).toLowerCase();
+    }
   }
 
   out.detail_url = loadedUrl;
@@ -250,9 +357,11 @@ const {
   maxRequestRetries = 2,
   proxyConfiguration = { useApifyProxy: true, apifyProxyGroups: ['RESIDENTIAL'], countryCode: 'US' },
   requestHandlerTimeoutSecs = 35,
-  downloadIntervalMs = 600,
+  downloadIntervalMs: downloadIntervalMsInput = null,
   preferCandidateSearch = false,     // set true to always use /candidate/search
 } = input;
+
+const downloadIntervalMs = downloadIntervalMsInput ?? (collect_details ? 600 : 320);
 
 const proxyConfig = await Actor.createProxyConfiguration(proxyConfiguration);
 
@@ -345,13 +454,14 @@ const crawler = new CheerioCrawler({
         newAdded++;
 
         if (!collect_details) {
-          await Dataset.pushData({
-            source: 'ziprecruiter',
-            scraped_at: new Date().toISOString(),
-            search_url: START_URL,
-            ...card,
+          const record = buildOutputRecord({
+            searchUrl: START_URL,
+            scrapedAt: new Date().toISOString(),
             url: norm,
+            referer: baseUrl,
+            card,
           });
+          await Dataset.pushData(record);
           pushed++;
         } else {
           if (!QUEUED_DETAILS.has(norm)) {
@@ -383,14 +493,15 @@ const crawler = new CheerioCrawler({
     if (label === 'DETAIL') {
       const base = request.loadedUrl ?? request.url;
       const detail = scrapeDetail($, base);
-      await Dataset.pushData({
-        source: 'ziprecruiter',
-        scraped_at: new Date().toISOString(),
-        search_url: START_URL,
-        ...request.userData.card,
-        ...detail,
+      const record = buildOutputRecord({
+        searchUrl: START_URL,
+        scrapedAt: new Date().toISOString(),
         url: normalizeJobUrl(base),
+        referer: request.userData.referer,
+        card: request.userData.card || {},
+        detail,
       });
+      await Dataset.pushData(record);
       pushed++;
       return;
     }
@@ -434,3 +545,4 @@ Input example:
   "proxyConfiguration": { "useApifyProxy": true, "apifyProxyGroups": ["RESIDENTIAL"], "countryCode": "US" }
 }
 */
+
