@@ -68,10 +68,30 @@
       "editor": "proxy",
       "prefill": {
         "useApifyProxy": true,
-        "apifyProxyGroups": ["RESIDENTIAL"]
+        "apifyProxyGroups": [
+          "RESIDENTIAL"
+        ]
       }
+    },
+    "postedWithin": {
+      "title": "Date Posted",
+      "type": "string",
+      "description": "Filter by how recently the job was posted.",
+      "editor": "select",
+      "enum": [
+        "any",
+        "24h",
+        "7d",
+        "30d"
+      ],
+      "enumTitles": [
+        "Any time",
+        "Last 24 hours",
+        "Last 7 days",
+        "Last 30 days"
+      ],
+      "default": "any"
     }
   },
-  "required": [
-  ]
+  "required": []
 }

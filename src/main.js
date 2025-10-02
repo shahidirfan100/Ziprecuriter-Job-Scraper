@@ -44,11 +44,14 @@ const extractJobId = (url) => {
   }
 };
 const buildOutputRecord = ({ searchUrl, scrapedAt, url, referer, card = {}, detail = {} }) => {
+  const rawDescriptionHtml = pickValue(detail.description_html, card.description_html);
+  const descriptionTextCandidate = pickValue(detail.description_text, card.description_text);
+  const descriptionText = descriptionTextCandidate || (rawDescriptionHtml ? htmlToText(rawDescriptionHtml) : null);
+
+  const company = sanitizeCompanyName(pickValue(detail.company, card.company));
   const title = pickValue(detail.title, card.title);
-  const company = pickValue(detail.company, card.company);
   const location = pickValue(detail.location, card.location);
   const employmentType = pickValue(detail.employment_type, card.employment_type);
-  const description = pickValue(detail.description_text, card.description_text);
   const postedText = pickValue(detail.posted_text, card.posted_text);
   const postedRelative = pickValue(detail.posted_relative, card.posted_relative);
   const salaryRaw = pickValue(detail.salary_raw, card.salary_raw);
@@ -67,7 +70,9 @@ const buildOutputRecord = ({ searchUrl, scrapedAt, url, referer, card = {}, deta
     title: title || null,
     company: company || null,
     location: location || null,
-    description: description || null,
+    description: descriptionText || null,
+    description_text: descriptionText || null,
+    description_html: rawDescriptionHtml || null,
     employment_type: employmentType || null,
     salary_raw: salaryRaw || null,
     salary_min: salaryMin ?? null,
@@ -81,6 +86,122 @@ const buildOutputRecord = ({ searchUrl, scrapedAt, url, referer, card = {}, deta
     direct_apply: detail.direct_apply ?? null,
     detail_url: detail.detail_url || null,
   };
+};
+
+const POSTED_WITHIN_MAP = new Map([
+  ['any', null],
+  ['1', 1],
+  ['1d', 1],
+  ['24', 1],
+  ['24h', 1],
+  ['7', 7],
+  ['7d', 7],
+  ['30', 30],
+  ['30d', 30],
+]);
+const resolvePostedWithin = (value) => {
+  if (value === undefined || value === null) return null;
+  const key = STR(value).toLowerCase();
+  return POSTED_WITHIN_MAP.has(key) ? POSTED_WITHIN_MAP.get(key) : null;
+};
+
+const BAD_COMPANY_SNIPPETS = ["about us", "careers", "investors", "blog", "press", "ziprecruiter.org", "ziprecruiter uk"];
+const sanitizeCompanyName = (raw) => {
+  const str = CLEAN(raw);
+  if (!str) return null;
+  let cleaned = str.replace(/\s*\[[^\]]+\]\s*$/, '');
+  cleaned = cleaned.replace(/^company[:\-\s]+/i, '');
+  const patterns = [
+    /\s*\|\s.*$/,
+    /\s*\/\s.*$/,
+    /\s+[-\u2013]\s+.*/,
+    /\s*\u2022\s+.*/
+  ];
+  for (const pattern of patterns) {
+    cleaned = CLEAN(cleaned.replace(pattern, ''));
+  }
+  if (/ at /i.test(cleaned)) cleaned = CLEAN(cleaned.split(/ at /i)[0]);
+  const lower = cleaned.toLowerCase();
+  if (!cleaned) return null;
+  if (BAD_COMPANY_SNIPPETS.some((bad) => lower.includes(bad))) return null;
+  return cleaned;
+};
+
+
+
+const COMPANY_ATTRS = ["data-company-name", "data-company", "content", "title", "aria-label", "data-name"];
+const readCompanyFromNode = ($node) => {
+  if (!$node || $node.length === 0) return null;
+  for (const attr of COMPANY_ATTRS) {
+    const val = sanitizeCompanyName($node.attr(attr));
+    if (val) return val;
+  }
+  return sanitizeCompanyName($node.text());
+};
+const extractCompanyFromCard = ($card) => {
+  if (!$card || $card.length === 0) return null;
+  for (const attr of COMPANY_ATTRS) {
+    const val = sanitizeCompanyName($card.attr(attr));
+    if (val) return val;
+  }
+  const selectors = [
+    "[data-company-name]",
+    "[data-company]",
+    "[data-testid=\"companyName\"]",
+    "[data-testid=\"company-name\"]",
+    ".job_org_name",
+    ".job-org-name",
+    ".job_org",
+    ".job-company",
+    ".company a",
+    ".company span",
+    ".company",
+    ".t_org_link",
+  ];
+  for (const sel of selectors) {
+    const $node = $card.find(sel).first();
+    const val = readCompanyFromNode($node);
+    if (val) return val;
+  }
+  return null;
+};
+const extractCompanyFromPage = ($) => {
+  const selectors = [
+    "[data-testid=\"hero-company-name\"]",
+    "[data-company-name]",
+    "[data-company]",
+    "[itemprop=\"hiringOrganization\"]",
+    ".job_org_name",
+    ".job-org-name",
+    ".company-name",
+    ".company a",
+    ".company span",
+    ".company",
+    "a.t_org_link",
+  ];
+  for (const sel of selectors) {
+    const $node = $(sel).first();
+    const val = readCompanyFromNode($node);
+    if (val) return val;
+  }
+  const metaTwitter = $('meta[name=\"twitter:data1\"]').attr('content');
+  if (metaTwitter) {
+    const candidate = sanitizeCompanyName(metaTwitter.split("\u2022")[0]);
+    if (candidate) return candidate;
+  }
+  const metaOg = $('meta[property=\"og:description\"]').attr('content');
+  if (metaOg) {
+    const candidate = sanitizeCompanyName(metaOg.split("\u2022")[0]);
+    if (candidate) return candidate;
+  }
+  return null;
+};
+const extractNodeHtml = ($node) => {
+  if (!$node || $node.length === 0) return null;
+  const clone = $node.clone();
+  clone.find('script, style, noscript').remove();
+  const html = STR(clone.html());
+  return html || null;
 };
 
 const UA_POOL = [
@@ -209,7 +330,7 @@ const scrapeCards = ($, baseUrl) => {
     const $card = $a.closest('article, li, div').first();
     const textBlob = CLEAN(($card.text() || '').slice(0, 800));
 
-    let company = CLEAN($card.find('a.t_org_link, .t_org_link, .company, [data-company]').first().text()) || null;
+    let company = extractCompanyFromCard($card) || sanitizeCompanyName($a.attr('data-company-name') || $a.attr('data-company'));
     let location = CLEAN($card.find('.job_location, .location, [data-location]').first().text()) || null;
     let employmentType = CLEAN($card.find('.employment-type, [data-employment-type]').first().text()) || null;
 
@@ -251,12 +372,7 @@ const scrapeDetail = ($, loadedUrl) => {
   const out = {};
   out.title = CLEAN($('h1, h1[itemprop="title"], h1[data-job-title]').first().text()) || null;
 
-  const companyCandidates = [
-    'a[href*="/co/"]',
-    '.company, [itemprop="hiringOrganization"]',
-    'h2:contains("Company") ~ *',
-  ].join(',');
-  out.company = CLEAN($(companyCandidates).first().text()) || null;
+  out.company = extractCompanyFromPage($) || null;
 
   const locCandidates = [
     '.location, .job_location, [itemprop="jobLocation"]',
@@ -264,9 +380,46 @@ const scrapeDetail = ($, loadedUrl) => {
   ].join(',');
   out.location = CLEAN($(locCandidates).first().text()) || null;
 
-  const descNode = $('section.job_description, #job_description, .job_description, [data-testid="jobDescription"], article').first();
-  const descriptionHtml = STR(descNode.html()) || null;
-  out.description_text = CLEAN(descNode.text()) || htmlToText(descriptionHtml);
+  const descriptionSelectors = [
+    '[data-testid="jobDescription"]',
+    '[data-job-description]',
+    'section.job_description',
+    'section.job-description',
+    '#job_description',
+    '.job_description',
+    '.jobDescription',
+    '.jobDescriptionSection',
+    '[itemprop="description"]',
+  ];
+  let descNode = null;
+  for (const sel of descriptionSelectors) {
+    const candidate = $(sel).first();
+    if (candidate && candidate.length && CLEAN(candidate.text())) {
+      descNode = candidate;
+      break;
+    }
+  }
+  if (!descNode || descNode.length === 0) {
+    const fallbackCandidate = $('article[itemprop="description"], article[data-testid="jobDescription"]').first();
+    if (fallbackCandidate && CLEAN(fallbackCandidate.text())) descNode = fallbackCandidate;
+  }
+
+  let descriptionHtml = null;
+  let descriptionText = null;
+  if (descNode && descNode.length) {
+    descriptionHtml = extractNodeHtml(descNode);
+    descriptionText = CLEAN(descNode.text()) || null;
+    if (descriptionText) {
+      const lower = descriptionText.toLowerCase();
+      if (lower.includes('ziprecruiter uk') || lower.includes('ziprecruiter.org')) {
+        descriptionText = null;
+        descriptionHtml = null;
+      }
+    }
+  }
+  if (descriptionHtml) out.description_html = descriptionHtml;
+  if (descriptionText) out.description_text = descriptionText;
+  if (!out.description_text && descriptionHtml) out.description_text = htmlToText(descriptionHtml);
 
   out.posted_text = CLEAN($('time[datetime], .posted, .posted-date, .t_posted').first().text()) || null;
   out.employment_type = CLEAN($('.employment-type, [data-employment-type]').first().text()) || null;
@@ -290,12 +443,28 @@ const scrapeDetail = ($, loadedUrl) => {
   const jp = extractJsonLd($);
   if (jp) {
     if (!out.title && jp.title) out.title = CLEAN(jp.title);
-    if (!out.company && jp.hiringOrganization?.name) out.company = CLEAN(jp.hiringOrganization.name);
-    if (!out.description_text && jp.description) out.description_text = htmlToText(jp.description);
+
+    const jpCompany = sanitizeCompanyName(jp.hiringOrganization?.name);
+    if (jpCompany) out.company = jpCompany;
+
     if (!out.employment_type && jp.employmentType) out.employment_type = CLEAN(jp.employmentType);
     if (!out.location && jp.jobLocation?.address) {
       const a = jp.jobLocation.address;
       out.location = CLEAN([a.addressLocality, a.addressRegion, a.addressCountry].filter(Boolean).join(', '));
+    }
+
+    const jsonDescRaw = STR(jp.description);
+    if (jsonDescRaw) {
+      if (!out.description_text) out.description_text = htmlToText(jsonDescRaw);
+      if (!out.description_html) {
+        const hasTags = /<[^>]+>/.test(jsonDescRaw);
+        if (hasTags) {
+          out.description_html = jsonDescRaw;
+        } else {
+          const parts = jsonDescRaw.split(/\r?\n{2,}/).map((seg) => seg.trim()).filter(Boolean);
+          out.description_html = parts.length ? `<p>${parts.join('</p><p>')}</p>` : `<p>${jsonDescRaw}</p>`;
+        }
+      }
     }
 
     if (jp.datePosted) out.date_posted_iso = jp.datePosted;
@@ -322,21 +491,28 @@ const scrapeDetail = ($, loadedUrl) => {
     }
   }
 
+  if (out.company) out.company = sanitizeCompanyName(out.company);
+  if (!out.description_text && out.description_html) out.description_text = htmlToText(out.description_html);
+  if (!out.description_html && out.description_text) out.description_html = `<p>${out.description_text}</p>`;
+
   out.detail_url = loadedUrl;
   return out;
 };
 
 // -------- fallback URL builders --------
-const buildJobsUrl = (kw, loc) => {
+const buildJobsUrl = (kw, loc, postedWithinDays) => {
   const slug = (kw || 'Jobs').trim().replace(/\s+/g, '-').replace(/[^A-Za-z0-9-]/g, '');
   let path = `/${encodeURIComponent(slug)}`;
   if (loc && loc.trim()) path += `/-in-${encodeURIComponent(loc.trim())}`;
-  return `https://www.ziprecruiter.com/Jobs${path}`;
+  const url = new URL(`https://www.ziprecruiter.com/Jobs${path}`);
+  if (postedWithinDays) url.searchParams.set('days', String(postedWithinDays));
+  return url.href;
 };
-const buildCandidateSearchUrl = (kw, loc) => {
+const buildCandidateSearchUrl = (kw, loc, postedWithinDays) => {
   const u = new URL('https://www.ziprecruiter.com/candidate/search');
   if (kw && kw.trim()) u.searchParams.set('search', kw.trim());
   if (loc && loc.trim()) u.searchParams.set('location', loc.trim());
+  if (postedWithinDays) u.searchParams.set('days', String(postedWithinDays));
   return u.href;
 };
 
@@ -351,6 +527,7 @@ const {
   startUrl,
   keyword = 'Administrative Assistant',
   location = '',
+  postedWithin = 'any',
   results_wanted = 100,
   collect_details = true,
   maxConcurrency = 2,
@@ -362,14 +539,16 @@ const {
 } = input;
 
 const downloadIntervalMs = downloadIntervalMsInput ?? (collect_details ? 600 : 320);
+const postedWithinDays = resolvePostedWithin(postedWithin);
 
 const proxyConfig = await Actor.createProxyConfiguration(proxyConfiguration);
 
 // Decide effective start URL
 let START_URL = startUrl?.trim()
-  || (preferCandidateSearch ? buildCandidateSearchUrl(keyword, location) : buildJobsUrl(keyword, location));
+  || (preferCandidateSearch ? buildCandidateSearchUrl(keyword, location, postedWithinDays) : buildJobsUrl(keyword, location, postedWithinDays));
 
-log.info(`ZipRecruiter start: ${START_URL} | details: ${collect_details ? 'ON' : 'OFF'} | target: ${results_wanted}`);
+const postedLabel = postedWithinDays ? `<=${postedWithinDays}d` : 'any';
+log.info(`ZipRecruiter start: ${START_URL} | details: ${collect_details ? 'ON' : 'OFF'} | target: ${results_wanted} | posted: ${postedLabel}`);
 
 let pushed = 0;
 const SEEN_URLS = new Set();     // global de-dup across pages
