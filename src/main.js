@@ -66,7 +66,6 @@ const buildOutputRecord = ({ searchUrl, scrapedAt, url, referer, card = {}, deta
     title: title || null,
     company: company || null,
     location: location || null,
-    description: descriptionText || null,
     description_text: descriptionText || null,
     description_html: rawDescriptionHtml || null,
     employment_type: employmentType || null,
