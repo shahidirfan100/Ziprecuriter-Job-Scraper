@@ -653,6 +653,8 @@ log.info(`ZipRecruiter FAST mode: ${START_URL} | details: ${collect_details ? 'O
 let pushed = 0;
 const SEEN_URLS = new Set();
 const QUEUED_DETAILS = new Set();
+let pagesProcessed = 0;
+const MAX_PAGES = 100; // Safety limit to prevent infinite loops
 
 const crawler = new CheerioCrawler({
   proxyConfiguration: proxyConfig,
@@ -720,10 +722,12 @@ const crawler = new CheerioCrawler({
     // REMOVED WARMUP - Start directly with LIST
     if (!label || label === 'LIST') {
       const baseUrl = request.loadedUrl ?? request.url;
+      pagesProcessed++;
 
       const cards = scrapeCards($, baseUrl);
       let newAdded = 0;
 
+      // Process ALL cards from this page (don't break early)
       for (const card of cards) {
         const norm = normalizeJobUrl(card.url);
         if (SEEN_URLS.has(norm)) continue;
@@ -749,30 +753,47 @@ const crawler = new CheerioCrawler({
             });
           }
         }
-
-        if (SEEN_URLS.size >= results_wanted) break;
       }
 
-      log.info(`LIST ${baseUrl} -> cards=${cards.length}, new=${newAdded}, SEEN=${SEEN_URLS.size}, pushed=${pushed}`);
+      log.info(`LIST page ${pagesProcessed}: cards=${cards.length}, new=${newAdded}, SEEN=${SEEN_URLS.size}, pushed=${pushed}, target=${results_wanted}`);
 
-      // OPTIMIZED: More aggressive pagination
-      if (SEEN_URLS.size < results_wanted) {
+      // FIXED: Continue pagination until we've SEEN enough jobs to meet target
+      // For details mode: we need to see MORE than target because some might fail
+      // For non-details mode: pushed count should match target
+      const bufferMultiplier = collect_details ? 1.2 : 1.0; // Queue 20% extra in details mode
+      const targetWithBuffer = Math.ceil(results_wanted * bufferMultiplier);
+      const needMore = SEEN_URLS.size < targetWithBuffer && pagesProcessed < MAX_PAGES;
+      
+      if (needMore) {
         const nextUrl = findNextPage($, baseUrl);
         if (nextUrl && nextUrl !== baseUrl) {
+          const remaining = results_wanted - (collect_details ? pushed : SEEN_URLS.size);
+          log.info(`✓ Queuing next page (need ~${remaining} more jobs, seen ${SEEN_URLS.size}/${targetWithBuffer})`);
           await enqueueLinks({ 
             urls: [nextUrl], 
             userData: { label: 'LIST', referer: baseUrl },
-            // High priority to keep pagination flowing
-            forefront: true 
+            forefront: true // Keep pagination at high priority
           });
         } else {
-          log.info('No next page detected.');
+          log.info(`⚠ No more pages found. Final: SEEN=${SEEN_URLS.size}, pushed=${pushed}/${results_wanted}`);
+        }
+      } else {
+        if (pagesProcessed >= MAX_PAGES) {
+          log.warning(`⚠ Reached MAX_PAGES limit (${MAX_PAGES}). Stopping pagination.`);
+        } else {
+          log.info(`✓ Target reached! SEEN=${SEEN_URLS.size}, pushed=${pushed}/${results_wanted}. Stopping pagination.`);
         }
       }
       return;
     }
 
     if (label === 'DETAIL') {
+      // Check if we've already hit target (skip if over limit)
+      if (pushed >= results_wanted) {
+        log.info(`Skipping detail page (already reached target: ${pushed}/${results_wanted})`);
+        return;
+      }
+      
       const base = request.loadedUrl ?? request.url;
       const detail = scrapeDetail($, base);
       const record = buildOutputRecord({
@@ -788,7 +809,7 @@ const crawler = new CheerioCrawler({
       
       // Log progress every 10 jobs
       if (pushed % 10 === 0) {
-        log.info(`Progress: ${pushed} jobs scraped`);
+        log.info(`📊 Progress: ${pushed}/${results_wanted} jobs scraped`);
       }
       return;
     }
@@ -812,5 +833,27 @@ await crawler.run([
   { url: START_URL, userData: { label: 'LIST', referer: 'https://www.google.com/' } },
 ]);
 
-log.info(`✓ Done. SEEN=${SEEN_URLS.size} pushed=${pushed}`);
+const finalCount = pushed;
+const successRate = SEEN_URLS.size > 0 ? ((finalCount / SEEN_URLS.size) * 100).toFixed(1) : 0;
+
+log.info(`
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+✓ SCRAPING COMPLETED
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  Target:        ${results_wanted} jobs
+  Scraped:       ${finalCount} jobs
+  Seen URLs:     ${SEEN_URLS.size}
+  Pages Crawled: ${pagesProcessed}
+  Success Rate:  ${successRate}%
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+`);
+
+if (finalCount < results_wanted) {
+  log.warning(`⚠ Only scraped ${finalCount}/${results_wanted} jobs. Possible reasons:
+  - Not enough jobs available for this search
+  - Pagination ended (no more pages found)
+  - Some detail pages failed to load
+  - Try: broader keyword, remove location filter, or check logs for errors`);
+}
+
 await Actor.exit();
