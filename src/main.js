@@ -3,7 +3,7 @@
 // Improvements: Parallel detail scraping, optimized intervals, better concurrency
 
 import { Actor, log } from 'apify';
-import { CheerioCrawler, Dataset, RequestQueue } from 'crawlee';
+import { CheerioCrawler, Dataset } from 'crawlee';
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const STR = (x) => (x ?? '').toString().trim();
@@ -324,123 +324,39 @@ const extractJsonLd = ($) => {
 };
 
 const findNextPage = ($, baseUrl) => {
-  const ABS = (href, base) => { try { return new URL(href, base).href; } catch { return null; } };
-  const pickNum = (s) => {
-    const n = Number(String(s || '').replace(/[^\d]/g, ''));
-    return Number.isFinite(n) ? n : null;
-  };
-
-  // 1) <link rel="next">
   let href = $('link[rel="next"]').attr('href');
   if (href) return ABS(href, baseUrl);
 
-  // 2) Explicit Next controls (aria or visible text)
-  const nextCandSel = [
-    'a[rel="next"]',
-    'a[aria-label]',
-    'button[aria-label]',
-    'nav[aria-label] a',
-    'a:contains("Next")',
-    'a:contains("›")',
-    'a:contains("»")',
-  ].join(',');
+  const aNext = $('a[rel="next"], a[aria-label="Next"], a[aria-label="next"]').attr('href');
+  if (aNext) return ABS(aNext, baseUrl);
 
-  const $next = $(nextCandSel).filter((i, el) => {
-    const txt = ($(el).text() || '').trim().toLowerCase();
-    const aria = ($(el).attr('aria-label') || '').trim().toLowerCase();
-    return /next|›|»/.test(txt) || /next/.test(aria) || ($(el).attr('rel') || '').toLowerCase() === 'next';
-  }).first();
+  const cur = new URL(baseUrl);
+  const pageKeys = ['p', 'page'];
+  const getCur = () => {
+    for (const k of pageKeys) {
+      const n = Number(cur.searchParams.get(k) || '1');
+      if (n) return { key: k, val: n };
+    }
+    return { key: 'p', val: 1 };
+  };
+  const curInfo = getCur();
 
-  if ($next.length) {
-    const h = $next.attr('href');
-    if (h) return ABS(h, baseUrl);
-  }
-
-  // 3) Numeric pager: find current page number and follow the next higher one
-  const pagerScopes = $('nav[aria-label], .pagination, [class*="pager"], body');
-  let curPage = null;
-
-  // try to find "current/active" page element
-  pagerScopes.find('a, span, button').each((_, el) => {
-    const $el = $(el);
-    const isActive =
-      /active|selected|current/i.test($el.attr('class') || '') ||
-      ($el.is('span') && /\d+/.test($el.text()));
-    const num = pickNum($el.text());
-    if (isActive && num && num >= 1) curPage = num;
-  });
-
-  // infer from URL if still unknown
-  if (curPage == null) {
+  let best = null;
+  $('a[href]').each((_, a) => {
+    const url = ABS($(a).attr('href'), baseUrl);
+    if (!url) return;
     try {
-      const cur = new URL(baseUrl);
-      const cands = ['page', 'p', 'pg', 'start', 'offset'];
-      for (const k of cands) {
-        const n = pickNum(cur.searchParams.get(k));
-        if (n && n >= 1) { curPage = n; break; }
+      const u = new URL(url);
+      for (const key of pageKeys) {
+        const p = Number(u.searchParams.get(key) || '0');
+        if (p > curInfo.val && (!best || p < best.p)) best = { p, url };
       }
     } catch {}
-  }
-
-  // collect numbered links
-  const numLinks = [];
-  pagerScopes.find('a[href]').each((_, a) => {
-    const $a = $(a);
-    const txtNum = pickNum($a.text());
-    if (!txtNum || txtNum < 1) return;
-    const h = $a.attr('href');
-    const abs = ABS(h, baseUrl);
-    if (abs) numLinks.push({ n: txtNum, url: abs });
   });
+  if (best) return best.url;
 
-  if (numLinks.length) {
-    if (curPage == null) {
-      const min = Math.min(...numLinks.map(x => x.n));
-      curPage = (Number.isFinite(min) && min >= 1) ? min : 1;
-    }
-    const candidates = numLinks.filter(x => x.n > curPage).sort((a, b) => a.n - b.n);
-    if (candidates[0]?.url) return candidates[0].url;
-  }
-
-  // 4) Scan for page-like params across anchors
-  let best = null;
-  try {
-    const cur = new URL(baseUrl);
-    const keys = ['page', 'p', 'pg', 'start', 'offset'];
-    const curInfo = (() => {
-      for (const k of keys) {
-        const n = pickNum(cur.searchParams.get(k));
-        if (n && n >= 1) return { key: k, val: n };
-      }
-      return { key: 'page', val: 1 };
-    })();
-
-    $('a[href]').each((_, a) => {
-      const url = ABS($(a).attr('href'), baseUrl);
-      if (!url) return;
-      try {
-        const u = new URL(url);
-        for (const key of keys) {
-          const p = pickNum(u.searchParams.get(key));
-          if (p && p > curInfo.val && (!best || p < best.p)) best = { p, url };
-        }
-      } catch {}
-    });
-
-    if (best?.url) return best.url;
-
-    // 5) Fallback: synthetically increment observed param
-    const inc = (key) => {
-      const u = new URL(baseUrl);
-      const curVal = pickNum(u.searchParams.get(key)) || 1;
-      u.searchParams.set(key, String(curVal + 1));
-      return u.href;
-    };
-    if (cur.searchParams.has(curInfo.key)) return inc(curInfo.key);
-    return inc(curInfo.key === 'page' ? 'p' : 'page');
-  } catch {}
-
-  return null;
+  const tryInc = (key) => { const u = new URL(baseUrl); u.searchParams.set(key, String((Number(u.searchParams.get(key) || '1') || 1) + 1)); return u.href; };
+  return cur.searchParams.has(curInfo.key) ? tryInc(curInfo.key) : tryInc(curInfo.key === 'p' ? 'page' : 'p');
 };
 
 const scrapeCards = ($, baseUrl) => {
@@ -740,10 +656,6 @@ const QUEUED_DETAILS = new Set();
 let pagesProcessed = 0;
 const MAX_PAGES = 100; // Safety limit to prevent infinite loops
 
-/* CHANGED: open and seed the RequestQueue BEFORE creating the crawler */
-const requestQueue = await RequestQueue.open();
-await requestQueue.addRequest({ url: START_URL, userData: { label: 'LIST', referer: 'https://www.google.com/' } });
-
 const crawler = new CheerioCrawler({
   proxyConfiguration: proxyConfig,
   maxConcurrency, // Higher concurrency
@@ -756,8 +668,6 @@ const crawler = new CheerioCrawler({
     maxPoolSize: 50, // INCREASED from 30
     sessionOptions: { maxUsageCount: 50 }, // INCREASED from 20
   },
-  /* provide the already opened requestQueue */
-  requestQueue,
 
   preNavigationHooks: [
     async (ctx) => {
@@ -852,22 +762,13 @@ const crawler = new CheerioCrawler({
       // For non-details mode: pushed count should match target
       const bufferMultiplier = collect_details ? 1.2 : 1.0; // Queue 20% extra in details mode
       const targetWithBuffer = Math.ceil(results_wanted * bufferMultiplier);
-      // When collecting details, prefer to stop only when we've queued enough detail pages (QUEUED_DETAILS),
-      // otherwise use seen URLs for non-detail mode.
-      let needMore;
-      if (collect_details) {
-        needMore = QUEUED_DETAILS.size < targetWithBuffer && pagesProcessed < MAX_PAGES;
-      } else {
-        needMore = SEEN_URLS.size < targetWithBuffer && pagesProcessed < MAX_PAGES;
-      }
+      const needMore = SEEN_URLS.size < targetWithBuffer && pagesProcessed < MAX_PAGES;
       
       if (needMore) {
         const nextUrl = findNextPage($, baseUrl);
         if (nextUrl && nextUrl !== baseUrl) {
-          const remaining = collect_details
-            ? Math.max(0, results_wanted - QUEUED_DETAILS.size)
-            : Math.max(0, results_wanted - SEEN_URLS.size);
-          log.info(`✓ Queuing next page (need ~${remaining} more jobs, seen ${SEEN_URLS.size}/${targetWithBuffer}, queuedDetails=${QUEUED_DETAILS.size})`);
+          const remaining = results_wanted - (collect_details ? pushed : SEEN_URLS.size);
+          log.info(`✓ Queuing next page (need ~${remaining} more jobs, seen ${SEEN_URLS.size}/${targetWithBuffer})`);
           await enqueueLinks({ 
             urls: [nextUrl], 
             userData: { label: 'LIST', referer: baseUrl },
@@ -927,7 +828,10 @@ const crawler = new CheerioCrawler({
   },
 });
 
-await crawler.run();
+// OPTIMIZED: Start directly with search URL (no warmup)
+await crawler.run([
+  { url: START_URL, userData: { label: 'LIST', referer: 'https://www.google.com/' } },
+]);
 
 const finalCount = pushed;
 const successRate = SEEN_URLS.size > 0 ? ((finalCount / SEEN_URLS.size) * 100).toFixed(1) : 0;
