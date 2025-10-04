@@ -656,6 +656,10 @@ const QUEUED_DETAILS = new Set();
 let pagesProcessed = 0;
 const MAX_PAGES = 100; // Safety limit to prevent infinite loops
 
+/* CHANGED: open and seed the RequestQueue BEFORE creating the crawler */
+const requestQueue = await RequestQueue.open();
+await requestQueue.addRequest({ url: START_URL, userData: { label: 'LIST', referer: 'https://www.google.com/' } });
+
 const crawler = new CheerioCrawler({
   proxyConfiguration: proxyConfig,
   maxConcurrency, // Higher concurrency
@@ -668,8 +672,8 @@ const crawler = new CheerioCrawler({
     maxPoolSize: 50, // INCREASED from 30
     sessionOptions: { maxUsageCount: 50 }, // INCREASED from 20
   },
-  /* use explicit requestQueue (created below) so we control all requests) */
-  requestQueue: null, // placeholder - will be replaced after creating the queue
+  /* provide the already opened requestQueue */
+  requestQueue,
 
   preNavigationHooks: [
     async (ctx) => {
@@ -839,11 +843,6 @@ const crawler = new CheerioCrawler({
   },
 });
 
-/* create and use a RequestQueue explicitly, enqueue the start URL and run crawler */
-const requestQueue = await RequestQueue.open();
-await requestQueue.addRequest({ url: START_URL, userData: { label: 'LIST', referer: 'https://www.google.com/' } });
-/* replace the placeholder with the real requestQueue */
-crawler.requestQueue = requestQueue;
 await crawler.run();
 
 const finalCount = pushed;
