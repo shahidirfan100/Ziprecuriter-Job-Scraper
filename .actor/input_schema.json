@@ -1,82 +1,34 @@
 {
-  "title": "ZipRecruiter Jobs Scraper",
-  "description": "A fast and lightweight actor to scrape job listings from ZipRecruiter using HTTP and Cheerio.",
+  "title": "ZipRecruiter Jobs Scraper (Fast & Optimized)",
+  "description": "A fast and lightweight actor to scrape job listings from ZipRecruiter using HTTP and Cheerio. Optimized for speed with parallel processing.",
   "type": "object",
   "schemaVersion": 1,
   "properties": {
     "startUrl": {
       "title": "Start URL (optional)",
       "type": "string",
-      "description": "A specific ZipRecruiter URL to start scraping from. If provided, it overrides Keyword and Location.",
+      "description": "A specific ZipRecruiter URL to start scraping from. If provided, it overrides Keyword, Location, and Date Posted filters.",
       "editor": "textfield",
       "prefill": "https://www.ziprecruiter.com/jobs/..."
     },
     "keyword": {
       "title": "Keyword",
       "type": "string",
-      "description": "Search term(s) for jobs (e.g., 'Software Developer', 'React').",
+      "description": "Search term(s) for jobs (e.g., 'Software Developer', 'React', 'Data Analyst').",
       "editor": "textfield",
       "default": "Software Engineer"
     },
     "location": {
       "title": "Location",
       "type": "string",
-      "description": "The job location to filter by (e.g., 'New York, NY', 'Remote').",
-      "editor": "textfield"
-    },
-    "results_wanted": {
-      "title": "Results Wanted",
-      "type": "integer",
-      "description": "The maximum number of job listings to scrape.",
-      "editor": "number",
-      "default": 100,
-      "minimum": 1
-    },
-    "collect_details": {
-      "title": "Collect Job Details",
-      "type": "boolean",
-      "description": "If enabled, the scraper will visit each job's detail page to extract more information. Disabling this makes the scrape faster but returns less data.",
-      "editor": "checkbox",
-      "default": true
-    },
-    "preferCandidateSearch": {
-      "title": "Prefer '/candidate/search' URLs",
-      "type": "boolean",
-      "description": "If enabled, the scraper will prefer using the '/candidate/search' URL structure, which can sometimes be more stable for pagination.",
-      "editor": "checkbox",
-      "default": false
-    },
-    "maxConcurrency": {
-      "title": "Max Concurrency",
-      "type": "integer",
-      "description": "The maximum number of parallel requests.",
-      "editor": "number",
-      "default": 2,
-      "minimum": 1,
-      "maximum": 50
-    },
-    "downloadIntervalMs": {
-      "title": "Download Interval (ms)",
-      "type": "integer",
-      "description": "Milliseconds to wait between requests to be polite to the server and avoid blocks.",
-      "default": 600
-    },
-    "proxyConfiguration": {
-      "title": "Proxy Configuration",
-      "type": "object",
-      "description": "Select proxies to be used by the crawler.",
-      "editor": "proxy",
-      "prefill": {
-        "useApifyProxy": true,
-        "apifyProxyGroups": [
-          "RESIDENTIAL"
-        ]
-      }
+      "description": "The job location to filter by (e.g., 'New York, NY', 'Remote', 'San Francisco').",
+      "editor": "textfield",
+      "prefill": ""
     },
     "postedWithin": {
       "title": "Date Posted",
       "type": "string",
-      "description": "Filter by how recently the job was posted.",
+      "description": "Filter by how recently the job was posted. Note: This filter only works when using Keyword search (not with custom Start URL).",
       "editor": "select",
       "enum": [
         "any",
@@ -91,6 +43,78 @@
         "Last 30 days"
       ],
       "default": "any"
+    },
+    "results_wanted": {
+      "title": "Results Wanted",
+      "type": "integer",
+      "description": "The maximum number of job listings to scrape.",
+      "editor": "number",
+      "default": 100,
+      "minimum": 1,
+      "maximum": 10000
+    },
+    "collect_details": {
+      "title": "Collect Job Details",
+      "type": "boolean",
+      "description": "If enabled, the scraper will visit each job's detail page to extract more information (full description, etc.). Disabling this makes the scrape much faster but returns less data.",
+      "editor": "checkbox",
+      "default": true
+    },
+    "preferCandidateSearch": {
+      "title": "Prefer '/candidate/search' URLs",
+      "type": "boolean",
+      "description": "If enabled, the scraper will use the '/candidate/search' URL structure instead of '/Jobs/'. This can sometimes provide different results or better pagination stability.",
+      "editor": "checkbox",
+      "default": false
+    },
+    "maxConcurrency": {
+      "title": "Max Concurrency",
+      "type": "integer",
+      "description": "The maximum number of parallel requests. Higher values = faster scraping but may increase blocking risk. Recommended: 8-15 for details, 15-25 without details.",
+      "editor": "number",
+      "default": 10,
+      "minimum": 1,
+      "maximum": 50
+    },
+    "downloadIntervalMs": {
+      "title": "Download Interval (ms)",
+      "type": "integer",
+      "description": "Milliseconds to wait between requests. Lower values = faster but higher block risk. Default: 200ms with details, 100ms without.",
+      "editor": "number",
+      "minimum": 0,
+      "maximum": 5000,
+      "nullable": true
+    },
+    "maxRequestRetries": {
+      "title": "Max Request Retries",
+      "type": "integer",
+      "description": "Number of times to retry failed requests.",
+      "editor": "number",
+      "default": 2,
+      "minimum": 0,
+      "maximum": 10
+    },
+    "requestHandlerTimeoutSecs": {
+      "title": "Request Handler Timeout (seconds)",
+      "type": "integer",
+      "description": "Maximum time to wait for each request to complete.",
+      "editor": "number",
+      "default": 35,
+      "minimum": 10,
+      "maximum": 120
+    },
+    "proxyConfiguration": {
+      "title": "Proxy Configuration",
+      "type": "object",
+      "description": "Select proxies to be used by the crawler. Residential proxies are highly recommended for ZipRecruiter.",
+      "editor": "proxy",
+      "prefill": {
+        "useApifyProxy": true,
+        "apifyProxyGroups": [
+          "RESIDENTIAL"
+        ],
+        "countryCode": "US"
+      }
     }
   },
   "required": []
