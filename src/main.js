@@ -3,7 +3,7 @@
 // Improvements: Parallel detail scraping, optimized intervals, better concurrency
 
 import { Actor, log } from 'apify';
-import { CheerioCrawler, Dataset } from 'crawlee';
+import { CheerioCrawler, Dataset, RequestQueue } from 'crawlee';
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const STR = (x) => (x ?? '').toString().trim();
@@ -668,6 +668,8 @@ const crawler = new CheerioCrawler({
     maxPoolSize: 50, // INCREASED from 30
     sessionOptions: { maxUsageCount: 50 }, // INCREASED from 20
   },
+  /* use explicit requestQueue (created below) so we control all requests) */
+  requestQueue: null, // placeholder - will be replaced after creating the queue
 
   preNavigationHooks: [
     async (ctx) => {
@@ -762,13 +764,22 @@ const crawler = new CheerioCrawler({
       // For non-details mode: pushed count should match target
       const bufferMultiplier = collect_details ? 1.2 : 1.0; // Queue 20% extra in details mode
       const targetWithBuffer = Math.ceil(results_wanted * bufferMultiplier);
-      const needMore = SEEN_URLS.size < targetWithBuffer && pagesProcessed < MAX_PAGES;
+      // When collecting details, prefer to stop only when we've queued enough detail pages (QUEUED_DETAILS),
+      // otherwise use seen URLs for non-detail mode.
+      let needMore;
+      if (collect_details) {
+        needMore = QUEUED_DETAILS.size < targetWithBuffer && pagesProcessed < MAX_PAGES;
+      } else {
+        needMore = SEEN_URLS.size < targetWithBuffer && pagesProcessed < MAX_PAGES;
+      }
       
       if (needMore) {
         const nextUrl = findNextPage($, baseUrl);
         if (nextUrl && nextUrl !== baseUrl) {
-          const remaining = results_wanted - (collect_details ? pushed : SEEN_URLS.size);
-          log.info(`✓ Queuing next page (need ~${remaining} more jobs, seen ${SEEN_URLS.size}/${targetWithBuffer})`);
+          const remaining = collect_details
+            ? Math.max(0, results_wanted - QUEUED_DETAILS.size)
+            : Math.max(0, results_wanted - SEEN_URLS.size);
+          log.info(`✓ Queuing next page (need ~${remaining} more jobs, seen ${SEEN_URLS.size}/${targetWithBuffer}, queuedDetails=${QUEUED_DETAILS.size})`);
           await enqueueLinks({ 
             urls: [nextUrl], 
             userData: { label: 'LIST', referer: baseUrl },
@@ -828,10 +839,12 @@ const crawler = new CheerioCrawler({
   },
 });
 
-// OPTIMIZED: Start directly with search URL (no warmup)
-await crawler.run([
-  { url: START_URL, userData: { label: 'LIST', referer: 'https://www.google.com/' } },
-]);
+/* create and use a RequestQueue explicitly, enqueue the start URL and run crawler */
+const requestQueue = await RequestQueue.open();
+await requestQueue.addRequest({ url: START_URL, userData: { label: 'LIST', referer: 'https://www.google.com/' } });
+/* replace the placeholder with the real requestQueue */
+crawler.requestQueue = requestQueue;
+await crawler.run();
 
 const finalCount = pushed;
 const successRate = SEEN_URLS.size > 0 ? ((finalCount / SEEN_URLS.size) * 100).toFixed(1) : 0;
