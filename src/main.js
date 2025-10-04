@@ -1,6 +1,6 @@
 // src/main.js
 // ZipRecruiter – Optimized for SPEED with HTTP-only (CheerioCrawler)
-// Improvements: Parallel detail scraping, optimized intervals, better concurrency
+// FIXED: Robust pagination to reach target job counts
 
 import { Actor, log } from 'apify';
 import { CheerioCrawler, Dataset } from 'crawlee';
@@ -325,62 +325,186 @@ const extractJsonLd = ($) => {
 
 const findNextPage = ($, baseUrl) => {
   let href = $('link[rel="next"]').attr('href');
-  if (href) return ABS(href, baseUrl);
+  if (href) {
+    const nextUrl = ABS(href, baseUrl);
+    if (nextUrl && nextUrl !== baseUrl) return nextUrl;
+  }
 
-  const aNext = $('a[rel="next"], a[aria-label="Next"], a[aria-label="next"]').attr('href');
-  if (aNext) return ABS(aNext, baseUrl);
+  const nextSelectors = [
+    'a[rel="next"]',
+    'a[aria-label="Next"]',
+    'a[aria-label="next"]',
+    'a.next',
+    'a[class*="next"]',
+  ];
+  
+  for (const sel of nextSelectors) {
+    const aNext = $(sel).attr('href');
+    if (aNext) {
+      const nextUrl = ABS(aNext, baseUrl);
+      if (nextUrl && nextUrl !== baseUrl) return nextUrl;
+    }
+  }
 
   const cur = new URL(baseUrl);
-  const pageKeys = ['p', 'page'];
-  const getCur = () => {
-    for (const k of pageKeys) {
-      const n = Number(cur.searchParams.get(k) || '1');
-      if (n) return { key: k, val: n };
-    }
-    return { key: 'p', val: 1 };
-  };
-  const curInfo = getCur();
-
-  let best = null;
-  $('a[href]').each((_, a) => {
-    const url = ABS($(a).attr('href'), baseUrl);
-    if (!url) return;
-    try {
-      const u = new URL(url);
-      for (const key of pageKeys) {
-        const p = Number(u.searchParams.get(key) || '0');
-        if (p > curInfo.val && (!best || p < best.p)) best = { p, url };
+  const pageKeys = ['page', 'p', 'page_number'];
+  
+  let currentPage = null;
+  let pageKey = null;
+  
+  for (const k of pageKeys) {
+    const val = cur.searchParams.get(k);
+    if (val) {
+      const num = parseInt(val, 10);
+      if (!isNaN(num) && num > 0) {
+        currentPage = num;
+        pageKey = k;
+        break;
       }
-    } catch {}
-  });
-  if (best) return best.url;
+    }
+  }
+  
+  if (currentPage && pageKey) {
+    const nextUrl = new URL(baseUrl);
+    nextUrl.searchParams.set(pageKey, String(currentPage + 1));
+    return nextUrl.href;
+  }
 
-  const tryInc = (key) => { const u = new URL(baseUrl); u.searchParams.set(key, String((Number(u.searchParams.get(key) || '1') || 1) + 1)); return u.href; };
-  return cur.searchParams.has(curInfo.key) ? tryInc(curInfo.key) : tryInc(curInfo.key === 'p' ? 'page' : 'p');
+  let bestNext = null;
+  let currentPageFromLinks = 1;
+  
+  $('a[href], .pagination a, .paging a').each((_, el) => {
+    const $el = $(el);
+    const text = $el.text().trim();
+    const href = $el.attr('href');
+    
+    if (!href) return;
+    
+    const isActive = $el.hasClass('active') || 
+                     $el.hasClass('current') || 
+                     $el.parent().hasClass('active') ||
+                     $el.parent().hasClass('current') ||
+                     $el.attr('aria-current') === 'page';
+    
+    const pageNum = parseInt(text, 10);
+    if (!isNaN(pageNum) && pageNum > 0) {
+      if (isActive) {
+        currentPageFromLinks = pageNum;
+      }
+      
+      const url = ABS(href, baseUrl);
+      if (url && url !== baseUrl) {
+        try {
+          const u = new URL(url);
+          for (const k of pageKeys) {
+            const p = parseInt(u.searchParams.get(k), 10);
+            if (!isNaN(p) && p > currentPageFromLinks) {
+              if (!bestNext || p < bestNext.pageNum) {
+                bestNext = { pageNum: p, url };
+              }
+            }
+          }
+        } catch {}
+      }
+    }
+  });
+  
+  if (bestNext && bestNext.pageNum === currentPageFromLinks + 1) {
+    return bestNext.url;
+  }
+
+  for (const key of pageKeys) {
+    if (cur.searchParams.has(key)) {
+      const currentVal = parseInt(cur.searchParams.get(key), 10);
+      if (!isNaN(currentVal)) {
+        const nextUrl = new URL(baseUrl);
+        nextUrl.searchParams.set(key, String(currentVal + 1));
+        return nextUrl.href;
+      }
+    }
+  }
+  
+  if (/\/(jobs|search|candidate)/i.test(baseUrl)) {
+    const nextUrl = new URL(baseUrl);
+    nextUrl.searchParams.set('page', '2');
+    return nextUrl.href;
+  }
+
+  return null;
+};
+
+const tryAlternativePagination = (currentUrl, currentPageNum) => {
+  try {
+    const url = new URL(currentUrl);
+    const nextPageNum = currentPageNum + 1;
+    
+    if (!url.searchParams.has('page')) {
+      url.searchParams.set('page', String(nextPageNum));
+      return url.href;
+    }
+    
+    if (!url.searchParams.has('p')) {
+      url.searchParams.delete('page');
+      url.searchParams.set('p', String(nextPageNum));
+      return url.href;
+    }
+    
+    if (!url.searchParams.has('start')) {
+      const pageSize = 20;
+      url.searchParams.set('start', String((nextPageNum - 1) * pageSize));
+      return url.href;
+    }
+    
+    if (!url.searchParams.has('page_number')) {
+      url.searchParams.set('page_number', String(nextPageNum));
+      return url.href;
+    }
+    
+    return null;
+  } catch (e) {
+    return null;
+  }
 };
 
 const scrapeCards = ($, baseUrl) => {
   const jobs = [];
+  
   const LINK_SEL = [
     'a.job_link',
+    'a.job-link',
+    'a[data-job-id]',
     'a[href*="/c/"][href*="/Job/"]',
     'a[href*="/job/"]',
     'a[href*="/jobs/"][href*="jid="]',
+    'article a[href*="/job"]',
+    '.job-card a',
+    '.job_card a',
+    '[class*="jobCard"] a',
   ].join(',');
 
-  $(LINK_SEL).each((_, el) => {
+  const $links = $(LINK_SEL);
+
+  $links.each((_, el) => {
     const $a = $(el);
     const href0 = $a.attr('href');
+    if (!href0) return;
+    
     const href = ABS(href0, baseUrl);
     if (!href) return;
-    if (!/\/(c|job|jobs)\//i.test(href)) return;
+    
+    if (!/\/(c|job|jobs)\//i.test(href) && !/jid=/i.test(href)) return;
 
-    let title = CLEAN($a.text()) || CLEAN($a.find('h2,h3').first().text());
-    const $card = $a.closest('article, li, div').first();
+    let title = CLEAN($a.text()) || CLEAN($a.find('h2,h3,h4').first().text());
+    
+    let $card = $a.closest('article, li, div[class*="job"]').first();
+    if (!$card || $card.length === 0) {
+      $card = $a.parent().closest('article, li, div').first();
+    }
+    
     const textBlob = CLEAN(($card.text() || '').slice(0, 800));
 
     let company = extractCompanyFromCard($card) || sanitizeCompanyName($a.attr('data-company-name') || $a.attr('data-company'));
-    let location = CLEAN($card.find('.job_location, .location, [data-location]').first().text()) || null;
+    let location = CLEAN($card.find('.job_location, .location, [data-location], [class*="location"]').first().text()) || null;
     let employmentType = CLEAN($card.find('.employment-type, [data-employment-type]').first().text()) || null;
 
     if (!location) {
@@ -414,7 +538,15 @@ const scrapeCards = ($, baseUrl) => {
     });
   });
 
-  return jobs;
+  const seen = new Set();
+  const unique = jobs.filter(job => {
+    const norm = normalizeJobUrl(job.url);
+    if (seen.has(norm)) return false;
+    seen.add(norm);
+    return true;
+  });
+
+  return unique;
 };
 
 const scrapeDetail = ($, loadedUrl) => {
@@ -443,8 +575,6 @@ const scrapeDetail = ($, loadedUrl) => {
     'article[itemprop="description"]',
     'article.job-details',
     'div.job-details',
-    'div[class*="job-content"]',
-    'section[class*="job-content"]',
   ];
   
   let descNode = null;
@@ -612,6 +742,7 @@ const buildJobsUrl = (kw, loc, postedWithinDays) => {
   if (postedWithinDays) url.searchParams.set('days', String(postedWithinDays));
   return url.href;
 };
+
 const buildCandidateSearchUrl = (kw, loc, postedWithinDays) => {
   const u = new URL('https://www.ziprecruiter.com/candidate/search');
   if (kw && kw.trim()) u.searchParams.set('search', kw.trim());
@@ -630,7 +761,7 @@ const {
   postedWithin = 'any',
   results_wanted = 100,
   collect_details = true,
-  maxConcurrency = 10, // INCREASED from 2
+  maxConcurrency = 10,
   maxRequestRetries = 2,
   proxyConfiguration = { useApifyProxy: true, apifyProxyGroups: ['RESIDENTIAL'], countryCode: 'US' },
   requestHandlerTimeoutSecs = 35,
@@ -638,7 +769,6 @@ const {
   preferCandidateSearch = false,
 } = input;
 
-// OPTIMIZED: Reduced intervals significantly
 const downloadIntervalMs = downloadIntervalMsInput ?? (collect_details ? 200 : 100);
 const postedWithinDays = resolvePostedWithin(postedWithin);
 
@@ -654,24 +784,37 @@ let pushed = 0;
 const SEEN_URLS = new Set();
 const QUEUED_DETAILS = new Set();
 let pagesProcessed = 0;
-const MAX_PAGES = 100; // Safety limit to prevent infinite loops
+let listPagesQueued = 1;
+const MAX_PAGES = 50;
+const PAGINATION_URLS_SEEN = new Set();
 
 const crawler = new CheerioCrawler({
   proxyConfiguration: proxyConfig,
-  maxConcurrency, // Higher concurrency
+  maxConcurrency,
   maxRequestRetries,
   requestHandlerTimeoutSecs,
   navigationTimeoutSecs: requestHandlerTimeoutSecs,
   useSessionPool: true,
   persistCookiesPerSession: true,
   sessionPoolOptions: {
-    maxPoolSize: 50, // INCREASED from 30
-    sessionOptions: { maxUsageCount: 50 }, // INCREASED from 20
+    maxPoolSize: 50,
+    sessionOptions: { maxUsageCount: 50 },
   },
+  autoscaledPoolOptions: {
+    maybeRunIntervalSecs: 0.5,
+    minConcurrency: 1,
+  },
+  maxRequestsPerCrawl: results_wanted * 3,
 
   preNavigationHooks: [
     async (ctx) => {
       const { request, session, proxyInfo } = ctx;
+      
+      if (request.userData?.label === 'DETAIL' && pushed >= results_wanted) {
+        request.skipNavigation = true;
+        return;
+      }
+      
       if (proxyInfo?.isApifyProxy && session?.id) {
         request.proxy = { ...(request.proxy || {}), session: session.id };
       }
@@ -695,7 +838,6 @@ const crawler = new CheerioCrawler({
       if (ctx.requestOptions) ctx.requestOptions.headers = { ...(ctx.requestOptions.headers || {}), ...headers };
       request.headers = { ...(request.headers || {}), ...headers };
       
-      // OPTIMIZED: Reduced sleep time with random jitter
       if (downloadIntervalMs) {
         const jitter = Math.floor(Math.random() * 100);
         await sleep(downloadIntervalMs + jitter);
@@ -719,15 +861,23 @@ const crawler = new CheerioCrawler({
       throw new Error('Blocked (bot page)');
     }
 
-    // REMOVED WARMUP - Start directly with LIST
     if (!label || label === 'LIST') {
       const baseUrl = request.loadedUrl ?? request.url;
       pagesProcessed++;
+      
+      PAGINATION_URLS_SEEN.add(baseUrl);
 
       const cards = scrapeCards($, baseUrl);
+      
+      if (cards.length === 0) {
+        log.warning(`⚠ No job cards found on page ${pagesProcessed}. URL: ${baseUrl}`);
+        if (pagesProcessed === 1) {
+          log.error('No jobs found on first page - check if URL is correct or site structure changed');
+        }
+      }
+      
       let newAdded = 0;
 
-      // Process ALL cards from this page (don't break early)
       for (const card of cards) {
         const norm = normalizeJobUrl(card.url);
         if (SEEN_URLS.has(norm)) continue;
@@ -755,42 +905,84 @@ const crawler = new CheerioCrawler({
         }
       }
 
-      log.info(`LIST page ${pagesProcessed}: cards=${cards.length}, new=${newAdded}, SEEN=${SEEN_URLS.size}, pushed=${pushed}, target=${results_wanted}`);
+      log.info(`📄 LIST page ${pagesProcessed}: found ${cards.length} cards, new ${newAdded} → SEEN=${SEEN_URLS.size}, scraped=${pushed}/${results_wanted}`);
 
-      // FIXED: Continue pagination until we've SEEN enough jobs to meet target
-      // For details mode: we need to see MORE than target because some might fail
-      // For non-details mode: pushed count should match target
-      const bufferMultiplier = collect_details ? 1.2 : 1.0; // Queue 20% extra in details mode
-      const targetWithBuffer = Math.ceil(results_wanted * bufferMultiplier);
-      const needMore = SEEN_URLS.size < targetWithBuffer && pagesProcessed < MAX_PAGES;
+      const estimatedJobsPerPage = cards.length > 0 ? cards.length : 20;
+      const remainingNeeded = results_wanted - SEEN_URLS.size;
+      const pagesNeeded = Math.ceil(remainingNeeded / estimatedJobsPerPage);
       
-      if (needMore) {
-        const nextUrl = findNextPage($, baseUrl);
-        if (nextUrl && nextUrl !== baseUrl) {
-          const remaining = results_wanted - (collect_details ? pushed : SEEN_URLS.size);
-          log.info(`✓ Queuing next page (need ~${remaining} more jobs, seen ${SEEN_URLS.size}/${targetWithBuffer})`);
-          await enqueueLinks({ 
-            urls: [nextUrl], 
-            userData: { label: 'LIST', referer: baseUrl },
-            forefront: true // Keep pagination at high priority
-          });
-        } else {
-          log.info(`⚠ No more pages found. Final: SEEN=${SEEN_URLS.size}, pushed=${pushed}/${results_wanted}`);
+      const pagesToQueue = Math.min(3, pagesNeeded);
+      
+      const shouldContinue = SEEN_URLS.size < results_wanted * 1.5 &&
+                             pagesProcessed < MAX_PAGES &&
+                             listPagesQueued < MAX_PAGES * 2;
+      
+      if (shouldContinue && pagesToQueue > 0) {
+        let currentUrl = baseUrl;
+        let successfulQueues = 0;
+        
+        for (let i = 0; i < pagesToQueue; i++) {
+          const nextUrl = findNextPage($, currentUrl);
+          
+          if (nextUrl && nextUrl !== currentUrl && !PAGINATION_URLS_SEEN.has(nextUrl)) {
+            listPagesQueued++;
+            PAGINATION_URLS_SEEN.add(nextUrl);
+            
+            if (i === 0) {
+              log.info(`➡️  Next page ${listPagesQueued}: ${nextUrl.substring(0, 100)}...`);
+            }
+            
+            await enqueueLinks({ 
+              urls: [nextUrl], 
+              userData: { label: 'LIST', referer: currentUrl },
+              forefront: i === 0
+            });
+            
+            currentUrl = nextUrl;
+            successfulQueues++;
+          } else {
+            break;
+          }
+        }
+        
+        if (successfulQueues === 0) {
+          if (PAGINATION_URLS_SEEN.has(nextUrl)) {
+            log.warning(`⚠ Pagination loop detected`);
+          } else {
+            log.warning(`⚠ No next page found after page ${pagesProcessed}. SEEN=${SEEN_URLS.size}, target=${results_wanted}`);
+          }
+          
+          if (newAdded > 0 && SEEN_URLS.size < results_wanted * 0.8) {
+            log.info('🔄 Trying alternative pagination method...');
+            const alternativeNext = tryAlternativePagination(baseUrl, pagesProcessed);
+            if (alternativeNext && !PAGINATION_URLS_SEEN.has(alternativeNext)) {
+              listPagesQueued++;
+              PAGINATION_URLS_SEEN.add(alternativeNext);
+              log.info(`➡️  Alternative page ${listPagesQueued}: ${alternativeNext.substring(0, 100)}...`);
+              await enqueueLinks({ 
+                urls: [alternativeNext], 
+                userData: { label: 'LIST', referer: baseUrl },
+                forefront: true
+              });
+            } else {
+              log.warning(`❌ Alternative pagination also failed`);
+            }
+          }
         }
       } else {
         if (pagesProcessed >= MAX_PAGES) {
-          log.warning(`⚠ Reached MAX_PAGES limit (${MAX_PAGES}). Stopping pagination.`);
+          log.warning(`⛔ Reached MAX_PAGES limit (${MAX_PAGES})`);
+        } else if (pagesToQueue <= 0) {
+          log.info(`✓ Enough jobs collected/queued`);
         } else {
-          log.info(`✓ Target reached! SEEN=${SEEN_URLS.size}, pushed=${pushed}/${results_wanted}. Stopping pagination.`);
+          log.info(`✓ Target buffer reached: SEEN=${SEEN_URLS.size} (target ${results_wanted})`);
         }
       }
       return;
     }
 
     if (label === 'DETAIL') {
-      // Check if we've already hit target (skip if over limit)
       if (pushed >= results_wanted) {
-        log.info(`Skipping detail page (already reached target: ${pushed}/${results_wanted})`);
         return;
       }
       
@@ -807,9 +999,8 @@ const crawler = new CheerioCrawler({
       await Dataset.pushData(record);
       pushed++;
       
-      // Log progress every 10 jobs
-      if (pushed % 10 === 0) {
-        log.info(`📊 Progress: ${pushed}/${results_wanted} jobs scraped`);
+      if (pushed % 25 === 0 || pushed === results_wanted) {
+        log.info(`📊 Progress: ${pushed}/${results_wanted} jobs scraped (${((pushed/results_wanted)*100).toFixed(1)}%)`);
       }
       return;
     }
@@ -828,7 +1019,9 @@ const crawler = new CheerioCrawler({
   },
 });
 
-// OPTIMIZED: Start directly with search URL (no warmup)
+log.info(`🚀 Starting crawler with target: ${results_wanted} jobs`);
+log.info(`📍 Start URL: ${START_URL}`);
+
 await crawler.run([
   { url: START_URL, userData: { label: 'LIST', referer: 'https://www.google.com/' } },
 ]);
@@ -840,20 +1033,31 @@ log.info(`
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 ✓ SCRAPING COMPLETED
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-  Target:        ${results_wanted} jobs
-  Scraped:       ${finalCount} jobs
-  Seen URLs:     ${SEEN_URLS.size}
-  Pages Crawled: ${pagesProcessed}
-  Success Rate:  ${successRate}%
+  🎯 Target:          ${results_wanted} jobs
+  ✅ Scraped:         ${finalCount} jobs
+  🔗 Unique URLs:     ${SEEN_URLS.size}
+  📄 Pages Crawled:   ${pagesProcessed}
+  📋 Pages Queued:    ${listPagesQueued}
+  📊 Success Rate:    ${successRate}%
+  ⚙️  Details Mode:    ${collect_details ? 'ON' : 'OFF'}
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 `);
 
 if (finalCount < results_wanted) {
-  log.warning(`⚠ Only scraped ${finalCount}/${results_wanted} jobs. Possible reasons:
-  - Not enough jobs available for this search
-  - Pagination ended (no more pages found)
-  - Some detail pages failed to load
-  - Try: broader keyword, remove location filter, or check logs for errors`);
+  const ratio = (finalCount / results_wanted * 100).toFixed(0);
+  log.warning(`⚠️  Only scraped ${finalCount}/${results_wanted} jobs (${ratio}%)`);
+  log.warning(`Possible reasons:`);
+  log.warning(`  • Not enough jobs available for this search query`);
+  log.warning(`  • Pagination stopped early (only ${pagesProcessed} pages found)`);
+  log.warning(`  • Some detail pages failed (check error logs above)`);
+  log.warning(`  • Site structure may have changed`);
+  log.warning(`\nSuggestions:`);
+  log.warning(`  • Try broader keyword (e.g., "Software" instead of "Senior React Developer")`);
+  log.warning(`  • Remove or broaden location filter`);
+  log.warning(`  • Try preferCandidateSearch: true`);
+  log.warning(`  • Check logs above for "No job cards found" or 403 errors`);
+} else if (finalCount > results_wanted) {
+  log.info(`✨ Exceeded target by ${finalCount - results_wanted} jobs (buffer zone worked)`);
 }
 
 await Actor.exit();
