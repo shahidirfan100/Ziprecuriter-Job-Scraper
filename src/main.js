@@ -920,9 +920,11 @@ const crawler = new CheerioCrawler({
       if (shouldContinue && pagesToQueue > 0) {
         let currentUrl = baseUrl;
         let successfulQueues = 0;
+        let lastFoundNextUrl = null;
         
         for (let i = 0; i < pagesToQueue; i++) {
           const nextUrl = findNextPage($, currentUrl);
+          lastFoundNextUrl = nextUrl;
           
           if (nextUrl && nextUrl !== currentUrl && !PAGINATION_URLS_SEEN.has(nextUrl)) {
             listPagesQueued++;
@@ -946,8 +948,8 @@ const crawler = new CheerioCrawler({
         }
         
         if (successfulQueues === 0) {
-          if (PAGINATION_URLS_SEEN.has(nextUrl)) {
-            log.warning(`⚠ Pagination loop detected`);
+          if (lastFoundNextUrl && PAGINATION_URLS_SEEN.has(lastFoundNextUrl)) {
+            log.warning(`⚠ Pagination loop detected - URL already seen`);
           } else {
             log.warning(`⚠ No next page found after page ${pagesProcessed}. SEEN=${SEEN_URLS.size}, target=${results_wanted}`);
           }
