@@ -1,6 +1,6 @@
 // src/main.js
 // ZipRecruiter – Optimized for SPEED with HTTP-only (CheerioCrawler)
-// FIXED: Robust pagination to reach target job counts
+// FIXED: Robust pagination to reach target job counts (+ maxJobs alias, stronger next-page discovery)
 
 import { Actor, log } from 'apify';
 import { CheerioCrawler, Dataset } from 'crawlee';
@@ -323,6 +323,7 @@ const extractJsonLd = ($) => {
   return null;
 };
 
+// UPDATED: Stronger next-page discovery
 const findNextPage = ($, baseUrl) => {
   let href = $('link[rel="next"]').attr('href');
   if (href) {
@@ -334,8 +335,16 @@ const findNextPage = ($, baseUrl) => {
     'a[rel="next"]',
     'a[aria-label="Next"]',
     'a[aria-label="next"]',
+    'a[aria-label*="Next"]',
     'a.next',
     'a[class*="next"]',
+    'li.next a',
+    '.pagination__next[href]',
+    '[data-testid*="pagination-next"][href]',
+    'a[data-testid*="PaginationNext"][href]',
+    'a:contains("Next")',
+    'a:contains("›")',
+    'a:contains("»")',
   ];
   
   for (const sel of nextSelectors) {
@@ -343,6 +352,26 @@ const findNextPage = ($, baseUrl) => {
     if (aNext) {
       const nextUrl = ABS(aNext, baseUrl);
       if (nextUrl && nextUrl !== baseUrl) return nextUrl;
+    }
+  }
+
+  // Button-like fallbacks carrying URL via attributes
+  const buttonCandidates = [
+    'button[aria-label*="Next"]',
+    'button[class*="next"]',
+    '[role="button"][aria-label*="Next"]',
+  ];
+  for (const sel of buttonCandidates) {
+    const $btn = $(sel).first();
+    if ($btn && $btn.length) {
+      const attrs = ['data-href', 'data-url', 'formaction'];
+      for (const a of attrs) {
+        const v = $btn.attr(a);
+        if (v) {
+          const nextUrl = ABS(v, baseUrl);
+          if (nextUrl && nextUrl !== baseUrl) return nextUrl;
+        }
+      }
     }
   }
 
@@ -376,9 +405,9 @@ const findNextPage = ($, baseUrl) => {
   $('a[href], .pagination a, .paging a').each((_, el) => {
     const $el = $(el);
     const text = $el.text().trim();
-    const href = $el.attr('href');
+    const href2 = $el.attr('href');
     
-    if (!href) return;
+    if (!href2) return;
     
     const isActive = $el.hasClass('active') || 
                      $el.hasClass('current') || 
@@ -392,7 +421,7 @@ const findNextPage = ($, baseUrl) => {
         currentPageFromLinks = pageNum;
       }
       
-      const url = ABS(href, baseUrl);
+      const url = ABS(href2, baseUrl);
       if (url && url !== baseUrl) {
         try {
           const u = new URL(url);
@@ -472,6 +501,7 @@ const scrapeCards = ($, baseUrl) => {
   const LINK_SEL = [
     'a.job_link',
     'a.job-link',
+    'a.t_job_link',                // added
     'a[data-job-id]',
     'a[href*="/c/"][href*="/Job/"]',
     'a[href*="/job/"]',
@@ -754,7 +784,7 @@ const buildCandidateSearchUrl = (kw, loc, postedWithinDays) => {
 await Actor.init();
 
 const input = (await Actor.getInput()) || {};
-const {
+let {
   startUrl,
   keyword = 'Administrative Assistant',
   location = '',
@@ -767,7 +797,16 @@ const {
   requestHandlerTimeoutSecs = 35,
   downloadIntervalMs: downloadIntervalMsInput = null,
   preferCandidateSearch = false,
+  // NEW: alias support without schema change
+  maxJobs,
+  max_jobs,
 } = input;
+
+// Normalize job cap aliases (no schema change)
+const aliasCap = toNumber(maxJobs ?? max_jobs);
+if (aliasCap && aliasCap > 0) {
+  results_wanted = aliasCap;
+}
 
 const downloadIntervalMs = downloadIntervalMsInput ?? (collect_details ? 200 : 100);
 const postedWithinDays = resolvePostedWithin(postedWithin);
@@ -915,7 +954,8 @@ const crawler = new CheerioCrawler({
       
       const shouldContinue = SEEN_URLS.size < results_wanted * 1.5 &&
                              pagesProcessed < MAX_PAGES &&
-                             listPagesQueued < MAX_PAGES * 2;
+                             listPagesQueued < MAX_PAGES * 2 &&
+                             pushed < results_wanted; // NEW: stop paginating when cap hit
       
       if (shouldContinue && pagesToQueue > 0) {
         let currentUrl = baseUrl;
@@ -931,7 +971,7 @@ const crawler = new CheerioCrawler({
             PAGINATION_URLS_SEEN.add(nextUrl);
             
             if (i === 0) {
-              log.info(`➡️  Next page ${listPagesQueued}: ${nextUrl.substring(0, 100)}...`);
+              log.info(`➡️  Next page queued (#${listPagesQueued}): ${nextUrl.substring(0, 100)}...`);
             }
             
             await enqueueLinks({ 
@@ -976,6 +1016,8 @@ const crawler = new CheerioCrawler({
           log.warning(`⛔ Reached MAX_PAGES limit (${MAX_PAGES})`);
         } else if (pagesToQueue <= 0) {
           log.info(`✓ Enough jobs collected/queued`);
+        } else if (pushed >= results_wanted) {
+          log.info(`✓ Job cap reached (${pushed}/${results_wanted}). Not queuing more pages.`);
         } else {
           log.info(`✓ Target buffer reached: SEEN=${SEEN_URLS.size} (target ${results_wanted})`);
         }
