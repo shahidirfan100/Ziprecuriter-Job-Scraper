@@ -1,6 +1,6 @@
 // src/main.js
 // ZipRecruiter – Optimized for SPEED with HTTP-only (CheerioCrawler)
-// FIXED: Robust pagination to reach target job counts (+ maxJobs alias, stronger next-page discovery)
+// FIXED: Robust pagination to reach target job counts (+ maxJobs alias, stronger next-page discovery, soft retry on empty pages)
 
 import { Actor, log } from 'apify';
 import { CheerioCrawler, Dataset } from 'crawlee';
@@ -118,22 +118,16 @@ const BAD_COMPANY_PATTERNS = [
 const sanitizeCompanyName = (raw) => {
   const str = CLEAN(raw);
   if (!str) return null;
-  
-  if (BAD_COMPANY_PATTERNS.some(pattern => pattern.test(str))) {
+
+  if (BAD_COMPANY_PATTERNS.some((pattern) => pattern.test(str))) {
     return null;
   }
-  
+
   let cleaned = str.replace(/\s*\[[^\]]+\]\s*$/, '');
   cleaned = cleaned.replace(/^company[:\-\s]+/i, '');
-  
-  const delimiters = [
-    /\s*\|\s/,
-    /\s*\/\s/,
-    /\s+[-–—]\s+/,
-    /\s*•\s*/,
-    /\s+at\s+/i,
-  ];
-  
+
+  const delimiters = [/\s*\|\s/, /\s*\/\s/, /\s+[-–—]\s+/, /\s*•\s*/, /\s+at\s+/i];
+
   for (const delimiter of delimiters) {
     if (delimiter.test(cleaned)) {
       const parts = cleaned.split(delimiter);
@@ -141,28 +135,28 @@ const sanitizeCompanyName = (raw) => {
       break;
     }
   }
-  
+
   if (!cleaned) return null;
-  
+
   const lower = cleaned.toLowerCase();
-  if (BAD_COMPANY_PATTERNS.some(pattern => pattern.test(lower))) {
+  if (BAD_COMPANY_PATTERNS.some((pattern) => pattern.test(lower))) {
     return null;
   }
-  
+
   if (cleaned.length < 2) return null;
-  
+
   return cleaned;
 };
 
 const extractCompanyFromCard = ($card) => {
   if (!$card || $card.length === 0) return null;
-  
+
   const dataAttrs = ['data-company-name', 'data-company'];
   for (const attr of dataAttrs) {
     const val = sanitizeCompanyName($card.attr(attr));
     if (val) return val;
   }
-  
+
   const companySelectors = [
     'a.company_name',
     'a[data-company-name]',
@@ -174,28 +168,28 @@ const extractCompanyFromCard = ($card) => {
     '.job_org_name',
     '.t_org_link',
   ];
-  
+
   for (const sel of companySelectors) {
     const $node = $card.find(sel).first();
     if ($node && $node.length) {
       const text = sanitizeCompanyName($node.text());
       if (text) return text;
-      
+
       const titleAttr = sanitizeCompanyName($node.attr('title'));
       if (titleAttr) return titleAttr;
-      
+
       const ariaLabel = sanitizeCompanyName($node.attr('aria-label'));
       if (ariaLabel) return ariaLabel;
     }
   }
-  
+
   const cardText = $card.text();
   const companyMatch = cardText.match(/(?:hiring\s+)?company:\s*([^\n\r|]+)/i);
   if (companyMatch) {
     const candidate = sanitizeCompanyName(companyMatch[1]);
     if (candidate) return candidate;
   }
-  
+
   return null;
 };
 
@@ -205,7 +199,7 @@ const extractCompanyFromPage = ($) => {
     const candidate = sanitizeCompanyName(jp.hiringOrganization.name);
     if (candidate) return candidate;
   }
-  
+
   const heroSelectors = [
     '[data-testid="hero-company-name"]',
     '[data-testid="companyName"]',
@@ -213,7 +207,7 @@ const extractCompanyFromPage = ($) => {
     'h3.company-name',
     'div.company-header',
   ];
-  
+
   for (const sel of heroSelectors) {
     const $node = $(sel).first();
     if ($node && $node.length) {
@@ -221,30 +215,27 @@ const extractCompanyFromPage = ($) => {
       if (text) return text;
     }
   }
-  
+
   const structuredSelectors = [
     '[itemprop="hiringOrganization"] [itemprop="name"]',
     '[itemprop="hiringOrganization"]',
     'a.company_link',
     'a[href*="/company/"]',
   ];
-  
+
   for (const sel of structuredSelectors) {
     const $node = $(sel).first();
     if ($node && $node.length) {
       const text = sanitizeCompanyName($node.text());
       if (text) return text;
-      
+
       const contentAttr = sanitizeCompanyName($node.attr('content'));
       if (contentAttr) return contentAttr;
     }
   }
-  
-  const metaSelectors = [
-    'meta[property="og:site_name"]',
-    'meta[name="twitter:data1"]',
-  ];
-  
+
+  const metaSelectors = ['meta[property="og:site_name"]', 'meta[name="twitter:data1"]'];
+
   for (const sel of metaSelectors) {
     const content = $(sel).attr('content');
     if (content) {
@@ -253,7 +244,7 @@ const extractCompanyFromPage = ($) => {
       if (candidate) return candidate;
     }
   }
-  
+
   return null;
 };
 
@@ -273,7 +264,13 @@ const UA_POOL = [
 ];
 const pickUA = () => UA_POOL[Math.floor(Math.random() * UA_POOL.length)];
 
-const ABS = (href, base) => { try { return new URL(href, base).href; } catch { return null; } };
+const ABS = (href, base) => {
+  try {
+    return new URL(href, base).href;
+  } catch {
+    return null;
+  }
+};
 
 const normalizeJobUrl = (u) => {
   try {
@@ -284,13 +281,16 @@ const normalizeJobUrl = (u) => {
     for (const [k, v] of url.searchParams.entries()) if (keep.has(k)) kept.set(k, v);
     url.search = kept.toString();
     return url.href;
-  } catch { return u; }
+  } catch {
+    return u;
+  }
 };
 
 const parseSalary = (txt) => {
   const s = CLEAN(txt || '');
   if (!s) return null;
-  const m = s.match(/\$?\s*([\d,.]+)\s*(K|M)?\s*-\s*\$?\s*([\d,.]+)\s*(K|M)?\s*\/?\s*(yr|hr|year|hour|annually|monthly)?/i);
+  const m =
+    s.match(/\$?\s*([\d,.]+)\s*(K|M)?\s*-\s*\$?\s*([\d,.]+)\s*(K|M)?\s*\/?\s*(yr|hr|year|hour|annually|monthly)?/i);
   if (!m) return { raw: s };
   const toNum = (num, mult) => {
     let n = Number(num.replace(/,/g, ''));
@@ -298,7 +298,12 @@ const parseSalary = (txt) => {
     if (mult?.toUpperCase() === 'M') n *= 1e6;
     return n;
   };
-  return { raw: s, min: toNum(m[1], m[2]), max: toNum(m[3], m[4]), period: (m[5] || '').toLowerCase() || null };
+  return {
+    raw: s,
+    min: toNum(m[1], m[2]),
+    max: toNum(m[3], m[4]),
+    period: (m[5] || '').toLowerCase() || null,
+  };
 };
 
 const guessPosted = (txt) => {
@@ -310,7 +315,9 @@ const guessPosted = (txt) => {
 
 const extractJsonLd = ($) => {
   try {
-    const blocks = $('script[type="application/ld+json"]').map((_, el) => $(el).contents().text()).get();
+    const blocks = $('script[type="application/ld+json"]')
+      .map((_, el) => $(el).contents().text())
+      .get();
     for (const b of blocks) {
       try {
         const data = JSON.parse(b);
@@ -323,15 +330,11 @@ const extractJsonLd = ($) => {
   return null;
 };
 
-// UPDATED: Stronger next-page discovery
+// UPDATED: Stronger next-page discovery, plus URL-only increment helper
 const findNextPage = ($, baseUrl) => {
-  let href = $('link[rel="next"]').attr('href');
-  if (href) {
-    const nextUrl = ABS(href, baseUrl);
-    if (nextUrl && nextUrl !== baseUrl) return nextUrl;
-  }
-
+  // Prefer semantic and common next anchors anywhere on the page
   const nextSelectors = [
+    'link[rel="next"]',
     'a[rel="next"]',
     'a[aria-label="Next"]',
     'a[aria-label="next"]',
@@ -346,21 +349,17 @@ const findNextPage = ($, baseUrl) => {
     'a:contains("›")',
     'a:contains("»")',
   ];
-  
+
   for (const sel of nextSelectors) {
-    const aNext = $(sel).attr('href');
-    if (aNext) {
-      const nextUrl = ABS(aNext, baseUrl);
+    const href = $(sel).attr('href');
+    if (href) {
+      const nextUrl = ABS(href, baseUrl);
       if (nextUrl && nextUrl !== baseUrl) return nextUrl;
     }
   }
 
-  // Button-like fallbacks carrying URL via attributes
-  const buttonCandidates = [
-    'button[aria-label*="Next"]',
-    'button[class*="next"]',
-    '[role="button"][aria-label*="Next"]',
-  ];
+  // Button-like fallbacks
+  const buttonCandidates = ['button[aria-label*="Next"]', 'button[class*="next"]', '[role="button"][aria-label*="Next"]'];
   for (const sel of buttonCandidates) {
     const $btn = $(sel).first();
     if ($btn && $btn.length) {
@@ -375,120 +374,85 @@ const findNextPage = ($, baseUrl) => {
     }
   }
 
+  // URL param-based increment
   const cur = new URL(baseUrl);
-  const pageKeys = ['page', 'p', 'page_number'];
-  
-  let currentPage = null;
-  let pageKey = null;
-  
+  const pageKeys = ['page', 'p', 'page_number', 'start'];
   for (const k of pageKeys) {
-    const val = cur.searchParams.get(k);
-    if (val) {
-      const num = parseInt(val, 10);
-      if (!isNaN(num) && num > 0) {
-        currentPage = num;
-        pageKey = k;
-        break;
+    if (cur.searchParams.has(k)) {
+      if (k === 'start') {
+        const start = parseInt(cur.searchParams.get('start'), 10) || 0;
+        const pageSize = 20;
+        cur.searchParams.set('start', String(start + pageSize));
+        return cur.href;
+      }
+      const val = Number(cur.searchParams.get(k));
+      if (Number.isFinite(val)) {
+        cur.searchParams.set(k, String(val + 1));
+        return cur.href;
       }
     }
-  }
-  
-  if (currentPage && pageKey) {
-    const nextUrl = new URL(baseUrl);
-    nextUrl.searchParams.set(pageKey, String(currentPage + 1));
-    return nextUrl.href;
   }
 
-  let bestNext = null;
-  let currentPageFromLinks = 1;
-  
-  $('a[href], .pagination a, .paging a').each((_, el) => {
-    const $el = $(el);
-    const text = $el.text().trim();
-    const href2 = $el.attr('href');
-    
-    if (!href2) return;
-    
-    const isActive = $el.hasClass('active') || 
-                     $el.hasClass('current') || 
-                     $el.parent().hasClass('active') ||
-                     $el.parent().hasClass('current') ||
-                     $el.attr('aria-current') === 'page';
-    
-    const pageNum = parseInt(text, 10);
-    if (!isNaN(pageNum) && pageNum > 0) {
-      if (isActive) {
-        currentPageFromLinks = pageNum;
-      }
-      
-      const url = ABS(href2, baseUrl);
-      if (url && url !== baseUrl) {
-        try {
-          const u = new URL(url);
-          for (const k of pageKeys) {
-            const p = parseInt(u.searchParams.get(k), 10);
-            if (!isNaN(p) && p > currentPageFromLinks) {
-              if (!bestNext || p < bestNext.pageNum) {
-                bestNext = { pageNum: p, url };
-              }
-            }
-          }
-        } catch {}
-      }
-    }
-  });
-  
-  if (bestNext && bestNext.pageNum === currentPageFromLinks + 1) {
-    return bestNext.url;
-  }
-
-  for (const key of pageKeys) {
-    if (cur.searchParams.has(key)) {
-      const currentVal = parseInt(cur.searchParams.get(key), 10);
-      if (!isNaN(currentVal)) {
-        const nextUrl = new URL(baseUrl);
-        nextUrl.searchParams.set(key, String(currentVal + 1));
-        return nextUrl.href;
-      }
-    }
-  }
-  
+  // If no params yet, synthesize page=2 for typical list paths.
   if (/\/(jobs|search|candidate)/i.test(baseUrl)) {
-    const nextUrl = new URL(baseUrl);
-    nextUrl.searchParams.set('page', '2');
-    return nextUrl.href;
+    cur.searchParams.set('page', '2');
+    return cur.href;
   }
 
   return null;
+};
+
+const findNextPageByUrlOnly = (baseUrl) => {
+  try {
+    const cur = new URL(baseUrl);
+    if (cur.searchParams.has('start')) {
+      const start = parseInt(cur.searchParams.get('start'), 10) || 0;
+      const pageSize = 20;
+      cur.searchParams.set('start', String(start + pageSize));
+      return cur.href;
+    }
+    const pageKeys = ['page', 'p', 'page_number'];
+    for (const k of pageKeys) {
+      const v = parseInt(cur.searchParams.get(k), 10);
+      if (!isNaN(v)) {
+        cur.searchParams.set(k, String(v + 1));
+        return cur.href;
+      }
+    }
+    cur.searchParams.set('page', '2');
+    return cur.href;
+  } catch {
+    return null;
+  }
 };
 
 const tryAlternativePagination = (currentUrl, currentPageNum) => {
   try {
     const url = new URL(currentUrl);
     const nextPageNum = currentPageNum + 1;
-    
+
     if (!url.searchParams.has('page')) {
       url.searchParams.set('page', String(nextPageNum));
       return url.href;
     }
-    
+
     if (!url.searchParams.has('p')) {
       url.searchParams.delete('page');
       url.searchParams.set('p', String(nextPageNum));
       return url.href;
     }
-    
+
     if (!url.searchParams.has('start')) {
       const pageSize = 20;
       url.searchParams.set('start', String((nextPageNum - 1) * pageSize));
       return url.href;
     }
-    
+
     if (!url.searchParams.has('page_number')) {
       url.searchParams.set('page_number', String(nextPageNum));
       return url.href;
     }
-    
+
     return null;
   } catch (e) {
     return null;
@@ -497,11 +461,11 @@ const tryAlternativePagination = (currentUrl, currentPageNum) => {
 
 const scrapeCards = ($, baseUrl) => {
   const jobs = [];
-  
+
   const LINK_SEL = [
     'a.job_link',
     'a.job-link',
-    'a.t_job_link',                // added
+    'a.t_job_link', // added to catch additional ZR variants
     'a[data-job-id]',
     'a[href*="/c/"][href*="/Job/"]',
     'a[href*="/job/"]',
@@ -518,22 +482,23 @@ const scrapeCards = ($, baseUrl) => {
     const $a = $(el);
     const href0 = $a.attr('href');
     if (!href0) return;
-    
+
     const href = ABS(href0, baseUrl);
     if (!href) return;
-    
+
     if (!/\/(c|job|jobs)\//i.test(href) && !/jid=/i.test(href)) return;
 
     let title = CLEAN($a.text()) || CLEAN($a.find('h2,h3,h4').first().text());
-    
+
     let $card = $a.closest('article, li, div[class*="job"]').first();
     if (!$card || $card.length === 0) {
       $card = $a.parent().closest('article, li, div').first();
     }
-    
+
     const textBlob = CLEAN(($card.text() || '').slice(0, 800));
 
-    let company = extractCompanyFromCard($card) || sanitizeCompanyName($a.attr('data-company-name') || $a.attr('data-company'));
+    let company =
+      extractCompanyFromCard($card) || sanitizeCompanyName($a.attr('data-company-name') || $a.attr('data-company'));
     let location = CLEAN($card.find('.job_location, .location, [data-location], [class*="location"]').first().text()) || null;
     let employmentType = CLEAN($card.find('.employment-type, [data-employment-type]').first().text()) || null;
 
@@ -547,7 +512,9 @@ const scrapeCards = ($, baseUrl) => {
     if (postMatch) postedText = postMatch[0];
 
     let salaryRaw = null;
-    const salMatch = textBlob.match(/\$\s?[\d.,]+(?:\s*[KM])?\s*-\s*\$\s?[\d.,]+(?:\s*[KM])?.{0,20}?(?:yr|hr|year|hour|annually)/i);
+    const salMatch = textBlob.match(
+      /\$\s?[\d.,]+(?:\s*[KM])?\s*-\s*\$\s?[\d.,]+(?:\s*[KM])?.{0,20}?(?:yr|hr|year|hour|annually)/i,
+    );
     if (salMatch) salaryRaw = salMatch[0];
 
     const postedGuess = postedText ? guessPosted(postedText) : null;
@@ -569,7 +536,7 @@ const scrapeCards = ($, baseUrl) => {
   });
 
   const seen = new Set();
-  const unique = jobs.filter(job => {
+  const unique = jobs.filter((job) => {
     const norm = normalizeJobUrl(job.url);
     if (seen.has(norm)) return false;
     seen.add(norm);
@@ -606,68 +573,75 @@ const scrapeDetail = ($, loadedUrl) => {
     'article.job-details',
     'div.job-details',
   ];
-  
+
   let descNode = null;
   let bestScore = 0;
-  
+
   for (const sel of descriptionSelectors) {
     const candidate = $(sel).first();
     if (candidate && candidate.length) {
       const text = CLEAN(candidate.text());
       const textLength = text.length;
-      
+
       let score = textLength;
-      
-      if (text.toLowerCase().includes('responsibilities') || 
-          text.toLowerCase().includes('requirements') ||
-          text.toLowerCase().includes('qualifications')) {
+
+      if (
+        text.toLowerCase().includes('responsibilities') ||
+        text.toLowerCase().includes('requirements') ||
+        text.toLowerCase().includes('qualifications')
+      ) {
         score += 1000;
       }
-      
-      if (text.toLowerCase().includes('ziprecruiter uk') ||
-          text.toLowerCase().includes('ziprecruiter.org') ||
-          text.toLowerCase().includes('about us careers')) {
+
+      if (
+        text.toLowerCase().includes('ziprecruiter uk') ||
+        text.toLowerCase().includes('ziprecruiter.org') ||
+        text.toLowerCase().includes('about us careers')
+      ) {
         score -= 5000;
       }
-      
+
       if (textLength >= 100 && score > bestScore) {
         bestScore = score;
         descNode = candidate;
       }
     }
   }
-  
+
   let descriptionHtml = null;
   let descriptionText = null;
-  
+
   if (descNode && descNode.length && bestScore > 0) {
     descriptionHtml = extractNodeHtml(descNode);
     descriptionText = CLEAN(descNode.text()) || null;
-    
+
     if (descriptionText) {
       const lower = descriptionText.toLowerCase();
-      
-      if (lower.includes('ziprecruiter uk') || 
-          lower.includes('ziprecruiter.org') ||
-          lower.includes('about us careers investors')) {
-        
+
+      if (
+        lower.includes('ziprecruiter uk') ||
+        lower.includes('ziprecruiter.org') ||
+        lower.includes('about us careers investors')
+      ) {
         const sections = descriptionText.split(/\n\n+/);
         let cleanedText = '';
-        
+
         for (const section of sections) {
           const sectionLower = section.toLowerCase();
-          if (section.length > 50 && 
-              !sectionLower.includes('ziprecruiter uk') &&
-              !sectionLower.includes('ziprecruiter.org') &&
-              !sectionLower.includes('about us careers')) {
+          if (
+            section.length > 50 &&
+            !sectionLower.includes('ziprecruiter uk') &&
+            !sectionLower.includes('ziprecruiter.org') &&
+            !sectionLower.includes('about us careers')
+          ) {
             cleanedText += section + '\n\n';
           }
         }
-        
+
         if (cleanedText.trim().length > 100) {
           descriptionText = CLEAN(cleanedText);
-          const paragraphs = cleanedText.split(/\n\n+/).filter(p => p.trim());
-          descriptionHtml = paragraphs.map(p => `<p>${CLEAN(p)}</p>`).join('');
+          const paragraphs = cleanedText.split(/\n\n+/).filter((p) => p.trim());
+          descriptionHtml = paragraphs.map((p) => `<p>${CLEAN(p)}</p>`).join('');
         } else {
           descriptionText = null;
           descriptionHtml = null;
@@ -675,7 +649,7 @@ const scrapeDetail = ($, loadedUrl) => {
       }
     }
   }
-  
+
   if (descriptionHtml) out.description_html = descriptionHtml;
   if (descriptionText) out.description_text = descriptionText;
   if (!out.description_text && descriptionHtml) out.description_text = htmlToText(descriptionHtml);
@@ -683,7 +657,8 @@ const scrapeDetail = ($, loadedUrl) => {
   out.posted_text = CLEAN($('time[datetime], .posted, .posted-date, .t_posted').first().text()) || null;
   out.employment_type = CLEAN($('.employment-type, [data-employment-type]').first().text()) || null;
 
-  const salaryDetailText = CLEAN($('.salary, .compensation, .pay, [data-salary], .job_salary, .job-salary').first().text()) || null;
+  const salaryDetailText =
+    CLEAN($('.salary, .compensation, .pay, [data-salary], .job_salary, .job-salary').first().text()) || null;
   if (salaryDetailText) {
     const parsed = parseSalary(salaryDetailText);
     if (parsed) {
@@ -717,13 +692,16 @@ const scrapeDetail = ($, loadedUrl) => {
       const jsonDescText = htmlToText(jsonDescRaw);
       if (jsonDescText && jsonDescText.length > 100) {
         out.description_text = jsonDescText;
-        
+
         if (!out.description_html) {
           const hasTags = /<[^>]+>/.test(jsonDescRaw);
           if (hasTags) {
             out.description_html = jsonDescRaw;
           } else {
-            const parts = jsonDescRaw.split(/\r?\n{2,}/).map((seg) => seg.trim()).filter(Boolean);
+            const parts = jsonDescRaw
+              .split(/\r?\n{2,}/)
+              .map((seg) => seg.trim())
+              .filter(Boolean);
             out.description_html = parts.length ? `<p>${parts.join('</p><p>')}</p>` : `<p>${jsonDescRaw}</p>`;
           }
         }
@@ -737,19 +715,22 @@ const scrapeDetail = ($, loadedUrl) => {
     if (jp.baseSalary) {
       const base = jp.baseSalary;
       const value = base && typeof base === 'object' ? base.value ?? base : {};
-      const salaryText = value && typeof value === 'object' ? (value.text ?? base.text ?? null) : (base.text ?? null);
+      const salaryText =
+        value && typeof value === 'object' ? value.text ?? base.text ?? null : base.text ?? null;
       if (salaryText && !out.salary_raw) out.salary_raw = CLEAN(salaryText);
 
-      const minCandidate = value && typeof value === 'object' ? (value.minValue ?? value.value ?? null) : null;
-      const maxCandidate = value && typeof value === 'object' ? (value.maxValue ?? null) : null;
+      const minCandidate = value && typeof value === 'object' ? value.minValue ?? value.value ?? null : null;
+      const maxCandidate = value && typeof value === 'object' ? value.maxValue ?? null : null;
       const minNumber = toNumber(minCandidate);
       const maxNumber = toNumber(maxCandidate);
       if (minNumber !== null) out.salary_min = minNumber;
       if (maxNumber !== null) out.salary_max = maxNumber;
 
-      const currency = value && typeof value === 'object' ? (value.currency ?? base.currency ?? null) : (base.currency ?? null);
+      const currency =
+        value && typeof value === 'object' ? value.currency ?? base.currency ?? null : base.currency ?? null;
       if (currency) out.salary_currency = CLEAN(currency);
-      const unit = value && typeof value === 'object' ? (value.unitText ?? base.unitText ?? null) : (base.unitText ?? null);
+      const unit =
+        value && typeof value === 'object' ? value.unitText ?? base.unitText ?? null : base.unitText ?? null;
       if (unit) out.salary_period = CLEAN(unit).toLowerCase();
     }
   }
@@ -797,7 +778,7 @@ let {
   requestHandlerTimeoutSecs = 35,
   downloadIntervalMs: downloadIntervalMsInput = null,
   preferCandidateSearch = false,
-  // NEW: alias support without schema change
+  // aliases accepted without schema change
   maxJobs,
   max_jobs,
 } = input;
@@ -813,11 +794,14 @@ const postedWithinDays = resolvePostedWithin(postedWithin);
 
 const proxyConfig = await Actor.createProxyConfiguration(proxyConfiguration);
 
-let START_URL = startUrl?.trim()
-  || (preferCandidateSearch ? buildCandidateSearchUrl(keyword, location, postedWithinDays) : buildJobsUrl(keyword, location, postedWithinDays));
+let START_URL =
+  startUrl?.trim() ||
+  (preferCandidateSearch ? buildCandidateSearchUrl(keyword, location, postedWithinDays) : buildJobsUrl(keyword, location, postedWithinDays));
 
 const postedLabel = postedWithinDays ? `<=${postedWithinDays}d` : 'any';
-log.info(`ZipRecruiter FAST mode: ${START_URL} | details: ${collect_details ? 'ON' : 'OFF'} | target: ${results_wanted} | posted: ${postedLabel}`);
+log.info(
+  `ZipRecruiter FAST mode: ${START_URL} | details: ${collect_details ? 'ON' : 'OFF'} | target: ${results_wanted} | posted: ${postedLabel}`,
+);
 
 let pushed = 0;
 const SEEN_URLS = new Set();
@@ -848,12 +832,12 @@ const crawler = new CheerioCrawler({
   preNavigationHooks: [
     async (ctx) => {
       const { request, session, proxyInfo } = ctx;
-      
+
       if (request.userData?.label === 'DETAIL' && pushed >= results_wanted) {
         request.skipNavigation = true;
         return;
       }
-      
+
       if (proxyInfo?.isApifyProxy && session?.id) {
         request.proxy = { ...(request.proxy || {}), session: session.id };
       }
@@ -862,21 +846,21 @@ const crawler = new CheerioCrawler({
       const referer = request.userData?.referer || 'https://www.google.com/';
       const headers = {
         'user-agent': ua,
-        'accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
+        accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
         'accept-language': 'en-US,en;q=0.9',
         'upgrade-insecure-requests': '1',
         'sec-fetch-dest': 'document',
         'sec-fetch-mode': 'navigate',
         'sec-fetch-site': 'same-origin',
-        'dnt': '1',
-        'referer': referer,
+        dnt: '1',
+        referer,
         'cache-control': 'no-cache',
-        'pragma': 'no-cache',
+        pragma: 'no-cache',
       };
       if (ctx.gotOptions) ctx.gotOptions.headers = { ...(ctx.gotOptions.headers || {}), ...headers };
       if (ctx.requestOptions) ctx.requestOptions.headers = { ...(ctx.requestOptions.headers || {}), ...headers };
       request.headers = { ...(request.headers || {}), ...headers };
-      
+
       if (downloadIntervalMs) {
         const jitter = Math.floor(Math.random() * 100);
         await sleep(downloadIntervalMs + jitter);
@@ -894,7 +878,11 @@ const crawler = new CheerioCrawler({
       throw new Error('Blocked (403)');
     }
     const bodyText = ($('body').text() || '').toLowerCase();
-    if (bodyText.includes('request blocked') || bodyText.includes('access denied') || bodyText.includes('verify you are a human')) {
+    if (
+      bodyText.includes('request blocked') ||
+      bodyText.includes('access denied') ||
+      bodyText.includes('verify you are a human')
+    ) {
       log.warning(`Bot page on ${request.url} — retire session ${session?.id}`);
       if (session) session.markBad();
       throw new Error('Blocked (bot page)');
@@ -903,18 +891,28 @@ const crawler = new CheerioCrawler({
     if (!label || label === 'LIST') {
       const baseUrl = request.loadedUrl ?? request.url;
       pagesProcessed++;
-      
+
       PAGINATION_URLS_SEEN.add(baseUrl);
 
       const cards = scrapeCards($, baseUrl);
-      
+
       if (cards.length === 0) {
-        log.warning(`⚠ No job cards found on page ${pagesProcessed}. URL: ${baseUrl}`);
-        if (pagesProcessed === 1) {
-          log.error('No jobs found on first page - check if URL is correct or site structure changed');
+        // Downgrade to warning and attempt a fast, single re-queue to mitigate transient empty HTML
+        log.warning(`⚠ No job cards parsed on page ${pagesProcessed}. URL: ${baseUrl}`);
+        if (!request.userData?._retriedEmpty && pagesProcessed === 1) {
+          log.info('↻ Soft retry first page once due to empty list (uniqueKey-suffixed).');
+          await enqueueLinks({
+            urls: [baseUrl],
+            userData: { label: 'LIST', referer: request.userData?.referer, _retriedEmpty: true },
+            forefront: true,
+            transformRequestFunction: (req) => {
+              req.uniqueKey = `${req.url}#empty-retry`;
+              return req;
+            },
+          });
         }
       }
-      
+
       let newAdded = 0;
 
       for (const card of cards) {
@@ -944,67 +942,73 @@ const crawler = new CheerioCrawler({
         }
       }
 
-      log.info(`📄 LIST page ${pagesProcessed}: found ${cards.length} cards, new ${newAdded} → SEEN=${SEEN_URLS.size}, scraped=${pushed}/${results_wanted}`);
+      log.info(
+        `📄 LIST page ${pagesProcessed}: found ${cards.length} cards, new ${newAdded} → SEEN=${SEEN_URLS.size}, scraped=${pushed}/${results_wanted}`,
+      );
 
       const estimatedJobsPerPage = cards.length > 0 ? cards.length : 20;
       const remainingNeeded = results_wanted - SEEN_URLS.size;
       const pagesNeeded = Math.ceil(remainingNeeded / estimatedJobsPerPage);
-      
-      const pagesToQueue = Math.min(3, pagesNeeded);
-      
-      const shouldContinue = SEEN_URLS.size < results_wanted * 1.5 &&
-                             pagesProcessed < MAX_PAGES &&
-                             listPagesQueued < MAX_PAGES * 2 &&
-                             pushed < results_wanted; // NEW: stop paginating when cap hit
-      
+
+      const pagesToQueue = Math.min(3, Math.max(0, pagesNeeded));
+
+      const shouldContinue =
+        SEEN_URLS.size < results_wanted * 1.5 &&
+        pagesProcessed < MAX_PAGES &&
+        listPagesQueued < MAX_PAGES * 2 &&
+        pushed < results_wanted; // stop paginating when cap hit
+
       if (shouldContinue && pagesToQueue > 0) {
         let currentUrl = baseUrl;
         let successfulQueues = 0;
         let lastFoundNextUrl = null;
-        
+
         for (let i = 0; i < pagesToQueue; i++) {
-          const nextUrl = findNextPage($, currentUrl);
+          const nextUrl = i === 0 ? findNextPage($, currentUrl) : findNextPageByUrlOnly(currentUrl);
           lastFoundNextUrl = nextUrl;
-          
+
           if (nextUrl && nextUrl !== currentUrl && !PAGINATION_URLS_SEEN.has(nextUrl)) {
             listPagesQueued++;
             PAGINATION_URLS_SEEN.add(nextUrl);
-            
+
             if (i === 0) {
               log.info(`➡️  Next page queued (#${listPagesQueued}): ${nextUrl.substring(0, 100)}...`);
             }
-            
-            await enqueueLinks({ 
-              urls: [nextUrl], 
+
+            await enqueueLinks({
+              urls: [nextUrl],
               userData: { label: 'LIST', referer: currentUrl },
-              forefront: i === 0
+              forefront: i === 0,
             });
-            
+
             currentUrl = nextUrl;
             successfulQueues++;
           } else {
             break;
           }
         }
-        
+
         if (successfulQueues === 0) {
           if (lastFoundNextUrl && PAGINATION_URLS_SEEN.has(lastFoundNextUrl)) {
             log.warning(`⚠ Pagination loop detected - URL already seen`);
           } else {
-            log.warning(`⚠ No next page found after page ${pagesProcessed}. SEEN=${SEEN_URLS.size}, target=${results_wanted}`);
+            log.warning(
+              `⚠ No next page found after page ${pagesProcessed}. SEEN=${SEEN_URLS.size}, target=${results_wanted}`,
+            );
           }
-          
-          if (newAdded > 0 && SEEN_URLS.size < results_wanted * 0.8) {
+
+          // Try alternative pagination regardless of newAdded to avoid early termination
+          if (SEEN_URLS.size < results_wanted * 0.9) {
             log.info('🔄 Trying alternative pagination method...');
             const alternativeNext = tryAlternativePagination(baseUrl, pagesProcessed);
             if (alternativeNext && !PAGINATION_URLS_SEEN.has(alternativeNext)) {
               listPagesQueued++;
               PAGINATION_URLS_SEEN.add(alternativeNext);
               log.info(`➡️  Alternative page ${listPagesQueued}: ${alternativeNext.substring(0, 100)}...`);
-              await enqueueLinks({ 
-                urls: [alternativeNext], 
+              await enqueueLinks({
+                urls: [alternativeNext],
                 userData: { label: 'LIST', referer: baseUrl },
-                forefront: true
+                forefront: true,
               });
             } else {
               log.warning(`❌ Alternative pagination also failed`);
@@ -1029,7 +1033,7 @@ const crawler = new CheerioCrawler({
       if (pushed >= results_wanted) {
         return;
       }
-      
+
       const base = request.loadedUrl ?? request.url;
       const detail = scrapeDetail($, base);
       const record = buildOutputRecord({
@@ -1042,9 +1046,9 @@ const crawler = new CheerioCrawler({
       });
       await Dataset.pushData(record);
       pushed++;
-      
+
       if (pushed % 25 === 0 || pushed === results_wanted) {
-        log.info(`📊 Progress: ${pushed}/${results_wanted} jobs scraped (${((pushed/results_wanted)*100).toFixed(1)}%)`);
+        log.info(`📊 Progress: ${pushed}/${results_wanted} jobs scraped (${((pushed / results_wanted) * 100).toFixed(1)}%)`);
       }
       return;
     }
@@ -1066,9 +1070,7 @@ const crawler = new CheerioCrawler({
 log.info(`🚀 Starting crawler with target: ${results_wanted} jobs`);
 log.info(`📍 Start URL: ${START_URL}`);
 
-await crawler.run([
-  { url: START_URL, userData: { label: 'LIST', referer: 'https://www.google.com/' } },
-]);
+await crawler.run([{ url: START_URL, userData: { label: 'LIST', referer: 'https://www.google.com/' } }]);
 
 const finalCount = pushed;
 const successRate = SEEN_URLS.size > 0 ? ((finalCount / SEEN_URLS.size) * 100).toFixed(1) : 0;
@@ -1088,7 +1090,7 @@ log.info(`
 `);
 
 if (finalCount < results_wanted) {
-  const ratio = (finalCount / results_wanted * 100).toFixed(0);
+  const ratio = ((finalCount / results_wanted) * 100).toFixed(0);
   log.warning(`⚠️  Only scraped ${finalCount}/${results_wanted} jobs (${ratio}%)`);
   log.warning(`Possible reasons:`);
   log.warning(`  • Not enough jobs available for this search query`);
