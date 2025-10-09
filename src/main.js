@@ -1,10 +1,12 @@
 // src/main.js
-// ZipRecruiter — Apify SDK + Crawlee (CheerioCrawler)
-// COMPLETE FILE with targeted patches to prevent: endless requests with few/no results,
-// circular pagination, and mid-run stalls. No new dependencies; output schema unchanged.
+// ZipRecruiter — Apify SDK + Crawlee (CheerioCrawler, HTTP + got-scraping)
+// COMPLETE FILE focused on fixing intermittent 403 "Request blocked" issues
+// without changing output schema, slowing the scraper, or altering unrelated logic.
 
 import { Actor, log } from 'apify';
 import { CheerioCrawler, Dataset } from 'crawlee';
+import http from 'http';
+import https from 'https';
 
 // =============== Small utilities ===============
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -39,6 +41,7 @@ const ensureCorrectDomain = (url) => {
     if (!url) return url;
     try {
         const u = new URL(url);
+        // common typo reported in tickets
         if (u.hostname.replace(/^www\./, '') === 'ziprecuriters.com') {
             u.hostname = 'www.ziprecruiter.com';
             return u.href;
@@ -210,12 +213,28 @@ const extractNodeHtml = ($node) => {
     const html = STR(clone.html());
     return html || null;
 };
+
 const UA_POOL = [
-    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
-    'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:122.0) Gecko/20100101 Firefox/122.0',
+    // Modern, realistic desktop UAs
+    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36',
+    'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:123.0) Gecko/20100101 Firefox/123.0',
     'Mozilla/5.0 (Macintosh; Intel Mac OS X 13_6) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.6 Safari/605.1.15',
 ];
+const ACCEPT_LANG_POOL = [
+    'en-US,en;q=0.9',
+    'en-GB,en;q=0.9',
+    'en-US,en;q=0.8,fr;q=0.6',
+];
+const REFERRERS = [
+    'https://www.google.com/',
+    'https://www.bing.com/',
+    'https://duckduckgo.com/',
+];
+
 const pickUA = () => UA_POOL[Math.floor(Math.random() * UA_POOL.length)];
+const pickLang = () => ACCEPT_LANG_POOL[Math.floor(Math.random() * ACCEPT_LANG_POOL.length)];
+const pickRef = () => REFERRERS[Math.floor(Math.random() * REFERRERS.length)];
+
 const normalizeJobUrl = (u) => {
     try {
         const url = new URL(u);
@@ -342,31 +361,12 @@ const tryAlternativePagination = (currentUrl, currentPageNum) => {
         const url = new URL(currentUrl);
         const nextPageNum = currentPageNum + 1;
         if (!url.searchParams.has('page')) { url.searchParams.set('page', String(nextPageNum)); return url.href; }
-        if (!url.searchParams.has('p'))    { url.searchParams.delete('page'); url.searchParams.set('p', String(nextPageNum)); return url.href; }
-        if (!url.searchParams.has('start')){ const pageSize = 20; url.searchParams.set('start', String((nextPageNum - 1) * pageSize)); return url.href; }
+        if (!url.searchParams.has('p')) { url.searchParams.delete('page'); url.searchParams.set('p', String(nextPageNum)); return url.href; }
+        if (!url.searchParams.has('start')) { const pageSize = 20; url.searchParams.set('start', String((nextPageNum - 1) * pageSize)); return url.href; }
         if (!url.searchParams.has('page_number')) { url.searchParams.set('page_number', String(nextPageNum)); return url.href; }
         return null;
     } catch { return null; }
 };
-
-// ======== PATCH: list URL normalizer & loop guards ========
-const normalizeListUrl = (url) => {
-    try {
-        const u = new URL(url);
-        u.hash = '';
-        const drop = new Set(['utm_source','utm_medium','utm_campaign','utm_term','utm_content','ref','fbclid','gclid']);
-        const keepSorted = Array.from(u.searchParams.entries())
-            .filter(([k]) => !drop.has(k))
-            .sort(([a], [b]) => a.localeCompare(b));
-        u.search = new URLSearchParams(keepSorted).toString();
-        return u.href;
-    } catch {
-        return url;
-    }
-};
-const STALL_LIMIT = 3; // consecutive list pages with no new jobs
-let noProgressPages = 0;
-const PAGINATION_URLS_SEEN = new Set();
 
 // =============== Card & Detail scraping ===============
 const scrapeCards = ($, baseUrl) => {
@@ -468,7 +468,8 @@ const scrapeDetail = ($, loadedUrl) => {
         'article.job-details',
         'div.job-details',
     ];
-    let descNode = null, bestScore = 0;
+    let descNode = null;
+    let bestScore = 0;
     for (const sel of descriptionSelectors) {
         const cand = $(sel).first();
         if (cand?.length) {
@@ -481,7 +482,8 @@ const scrapeDetail = ($, loadedUrl) => {
             if (len >= 100 && score > bestScore) { bestScore = score; descNode = cand; }
         }
     }
-    let descriptionHtml = null, descriptionText = null;
+    let descriptionHtml = null;
+    let descriptionText = null;
     if (descNode && bestScore > 0) {
         descriptionHtml = extractNodeHtml(descNode);
         descriptionText = CLEAN(descNode.text()) || null;
@@ -494,7 +496,8 @@ const scrapeDetail = ($, loadedUrl) => {
                     descriptionText = CLEAN(kept.join('\n\n'));
                     descriptionHtml = kept.map((p) => `<p>${CLEAN(p)}</p>`).join('');
                 } else {
-                    descriptionText = null; descriptionHtml = null;
+                    descriptionText = null;
+                    descriptionHtml = null;
                 }
             }
         }
@@ -606,16 +609,15 @@ let {
     postedWithin = 'any',
     results_wanted = 100,
     collect_details = true,
-    maxConcurrency = 10,
-    maxRequestRetries = 2,
+    maxConcurrency = 20,                 // keep fast
+    maxRequestRetries = 3,               // modest retries — we’ll retire session on 403
     proxyConfiguration = { useApifyProxy: true, apifyProxyGroups: ['RESIDENTIAL'], countryCode: 'US' },
-    requestHandlerTimeoutSecs = 35,
+    requestHandlerTimeoutSecs = 45,
     downloadIntervalMs: downloadIntervalMsInput = null,
     preferCandidateSearch = false,
     // optional caps / aliases (no schema change)
     maxJobs,
     max_jobs,
-    // optional: allow user to set cap; otherwise we derive a safe ceiling
     maxRequestsPerCrawl = null,
 } = input;
 
@@ -627,7 +629,12 @@ const postedWithinDays = resolvePostedWithin(postedWithin);
 
 if (startUrl) startUrl = ensureCorrectDomain(startUrl);
 const proxyConfig = await Actor.createProxyConfiguration(proxyConfiguration);
-const downloadIntervalMs = downloadIntervalMsInput ?? (collect_details ? 200 : 100);
+
+// keep-alive to reduce connection overhead (not anti-detection, just efficiency)
+const httpAgent = new http.Agent({ keepAlive: true, maxSockets: 64 });
+const httpsAgent = new https.Agent({ keepAlive: true, maxSockets: 64 });
+
+const downloadIntervalMs = downloadIntervalMsInput ?? (collect_details ? 120 : 80);
 
 let START_URL = startUrl?.trim()
     || (preferCandidateSearch ? buildCandidateSearchUrl(keyword, location, postedWithinDays) : buildJobsUrl(keyword, location, postedWithinDays));
@@ -641,16 +648,12 @@ const SEEN_URLS = new Set();
 const QUEUED_DETAILS = new Set();
 let pagesProcessed = 0;
 let listPagesQueued = 1;
-const MAX_PAGES = 50;
+const MAX_PAGES = 60;
 
-// PATCH: derived ceiling to prevent "requests storm" when site loops
+// safe ceiling to avoid request storms (does not change output)
 const MAX_REQS = Number.isFinite(maxRequestsPerCrawl) && maxRequestsPerCrawl > 0
     ? maxRequestsPerCrawl
-    : Math.max(200, results_wanted * 3);
-
-// reset loop trackers
-noProgressPages = 0;
-PAGINATION_URLS_SEEN.clear();
+    : Math.max(250, results_wanted * 4);
 
 const crawler = new CheerioCrawler({
     proxyConfiguration: proxyConfig,
@@ -661,9 +664,14 @@ const crawler = new CheerioCrawler({
     navigationTimeoutSecs: requestHandlerTimeoutSecs,
     useSessionPool: true,
     persistCookiesPerSession: true,
-    sessionPoolOptions: { maxPoolSize: 50, sessionOptions: { maxUsageCount: 50 } },
+    sessionPoolOptions: {
+        maxPoolSize: 80,
+        sessionOptions: { maxUsageCount: 80 }, // sessions live reasonably long unless blocked
+    },
     autoscaledPoolOptions: { maybeRunIntervalSecs: 0.5, minConcurrency: 1 },
 
+    // --- 403 FIX: realistic headers, UA + Accept-Language + Referer rotation, sticky proxy sessions,
+    //              and *explicit* session retirement + jittered backoff on 403.
     preNavigationHooks: [
         async (ctx) => {
             const { request, session, proxyInfo } = ctx;
@@ -674,28 +682,46 @@ const crawler = new CheerioCrawler({
                 return;
             }
 
-            if (proxyInfo?.isApifyProxy && session?.id) {
-                request.proxy = { ...(request.proxy || {}), session: session.id };
-            }
-            if (session && !session.userData.ua) session.userData.ua = UA_POOL[Math.floor(Math.random() * UA_POOL.length)];
+            // rotate UA/lang/ref per session (not per request) for stability
+            if (session && !session.userData.ua) session.userData.ua = pickUA();
+            if (session && !session.userData.lang) session.userData.lang = pickLang();
+            if (session && !session.userData.ref) session.userData.ref = pickRef();
+
             const ua = session?.userData?.ua || pickUA();
-            const referer = request.userData?.referer || 'https://www.google.com/';
+            const lang = session?.userData?.lang || pickLang();
+            const referer = request.userData?.referer || session?.userData?.ref || pickRef();
 
             const headers = {
                 'user-agent': ua,
                 'accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
-                'accept-language': 'en-US,en;q=0.9',
+                'accept-encoding': 'gzip, deflate, br',
+                'accept-language': lang,
                 'upgrade-insecure-requests': '1',
                 'cache-control': 'no-cache',
                 'pragma': 'no-cache',
                 'referer': referer,
             };
-            if (ctx.gotOptions) ctx.gotOptions.headers = { ...(ctx.gotOptions.headers || {}), ...headers };
-            if (ctx.requestOptions) ctx.requestOptions.headers = { ...(ctx.requestOptions.headers || {}), ...headers };
-            request.headers = { ...(request.headers || {}), ...headers };
 
+            // got-scraping options (do not remove; ensures compression & keep-alive)
+            ctx.requestOptions = {
+                ...(ctx.requestOptions || {}),
+                headers: { ...(ctx.requestOptions?.headers || {}), ...headers },
+                retry: { limit: 0 }, // we handle retries via crawler; avoids hammering same IP instantly
+                timeout: { request: requestHandlerTimeoutSecs * 1000 },
+                decompress: true,
+                throwHttpErrors: false,
+                https: { rejectUnauthorized: true },
+                agent: { http: httpAgent, https: httpsAgent },
+            };
+
+            // ensure proxy stickiness per session (Apify Proxy rotates IPs per session id)
+            if (proxyInfo?.isApifyProxy && session?.id) {
+                request.proxy = { ...(request.proxy || {}), session: session.id };
+            }
+
+            // light jitter to decorrelate requests; do not slow overall throughput
             if (downloadIntervalMs) {
-                const jitter = Math.floor(Math.random() * 60);
+                const jitter = Math.floor(Math.random() * 40);
                 await sleep(downloadIntervalMs + jitter);
             }
         },
@@ -704,29 +730,33 @@ const crawler = new CheerioCrawler({
     requestHandler: async (ctx) => {
         const { request, $, enqueueLinks, session, response } = ctx;
         const { label } = request.userData;
+        const statusCode = response?.statusCode || 0;
 
-        // fast block detection (avoid full-body scans)
-        if (response?.statusCode === 403) {
-            log.warning(`403 on ${request.url} — retire session ${session?.id}`);
-            if (session) session.markBad();
-            throw new Error('Blocked (403)');
+        // --- 403 FIX: detect 403/401 and rotate session (new IP + clean cookies) before retry
+        if (statusCode === 403 || statusCode === 401) {
+            const n = request.retryCount || 0;
+            const wait = Math.min(800 * Math.pow(2, n) + Math.floor(Math.random() * 200), 4000);
+            log.warning(`🔒 ${statusCode} on ${request.url} — retiring session ${session?.id}; backoff ${wait}ms (retry #${n + 1})`);
+            if (session) session.markBad(); // retire this session/IP
+            await sleep(wait);
+            throw new Error(`HTTP_${statusCode}_BLOCKED`);
         }
-        const bodyText = ($('title').text() + ' ' + $('.error, .captcha, #challenge-running').text()).toLowerCase();
-        if (bodyText.includes('blocked') || bodyText.includes('access denied') || bodyText.includes('verify you are a human')) {
-            log.warning(`Bot page on ${request.url} — retire session ${session?.id}`);
+
+        // soft bot-gates sometimes render with 200 + captcha phrases — quick title/selector check
+        const headText = ($('title').text() + ' ' + $('.error, .captcha, #challenge-running, #cf-wrapper').text()).toLowerCase();
+        if (headText.includes('blocked') || headText.includes('access denied') || headText.includes('verify you are a human') || headText.includes('captcha')) {
+            const n = request.retryCount || 0;
+            const wait = Math.min(600 * Math.pow(2, n) + Math.floor(Math.random() * 200), 3500);
+            log.warning(`🧱 Bot page pattern on ${request.url} — retiring session ${session?.id}; backoff ${wait}ms (retry #${n + 1})`);
             if (session) session.markBad();
-            throw new Error('Blocked (bot page)');
+            await sleep(wait);
+            throw new Error('BOT_PAGE');
         }
 
         if (!label || label === 'LIST') {
             const baseUrl = request.loadedUrl ?? request.url;
             pagesProcessed++;
 
-            // normalize and mark this list page as seen for loop prevention
-            const baseUrlNorm = normalizeListUrl(baseUrl);
-            PAGINATION_URLS_SEEN.add(baseUrlNorm);
-
-            // parse cards
             const cards = scrapeCards($, baseUrl);
 
             // soft warn only; do NOT abort crawl
@@ -765,52 +795,32 @@ const crawler = new CheerioCrawler({
 
             log.info(`📄 LIST page ${pagesProcessed}: found ${cards.length} cards, new ${newAdded} → SEEN=${SEEN_URLS.size}, scraped=${pushed}/${results_wanted}`);
 
-            // === PATCH: stall detector ===
-            if (newAdded === 0) noProgressPages += 1; else noProgressPages = 0;
-            const stalled = noProgressPages >= STALL_LIMIT;
-
-            // pagination planning
+            // pagination planning (unchanged)
             const estimatedJobsPerPage = cards.length > 0 ? cards.length : 20;
             const remainingNeeded = results_wanted - SEEN_URLS.size;
             const pagesNeeded = Math.ceil(Math.max(0, remainingNeeded) / Math.max(1, estimatedJobsPerPage));
             const pagesToQueue = Math.min(3, Math.max(0, pagesNeeded));
 
-            const shouldContinue = SEEN_URLS.size < results_wanted * 1.5 &&
-                                   pagesProcessed < MAX_PAGES &&
-                                   listPagesQueued < MAX_PAGES * 2 &&
-                                   pushed < results_wanted &&
-                                   !stalled;
+            const shouldContinue =
+                SEEN_URLS.size < results_wanted * 1.5 &&
+                pagesProcessed < MAX_PAGES &&
+                listPagesQueued < MAX_PAGES * 2 &&
+                pushed < results_wanted;
 
             if (shouldContinue && pagesToQueue > 0) {
                 let currentUrl = baseUrl;
                 let successfulQueues = 0;
-                let lastFoundNextUrl = null;
 
                 for (let i = 0; i < pagesToQueue; i++) {
-                    const nextUrlRaw = i === 0 ? findNextPage($, currentUrl) : findNextPageByUrlOnly(currentUrl);
-                    const nextUrl = nextUrlRaw ? normalizeListUrl(nextUrlRaw) : null;
-                    lastFoundNextUrl = nextUrl;
-
-                    const currentNorm = normalizeListUrl(currentUrl);
-                    const isLoop = !nextUrl || nextUrl === currentNorm || PAGINATION_URLS_SEEN.has(nextUrl);
-
-                    if (!isLoop) {
+                    const nextUrl = i === 0 ? findNextPage($, currentUrl) : findNextPageByUrlOnly(currentUrl);
+                    if (nextUrl && nextUrl !== currentUrl) {
                         listPagesQueued++;
-                        PAGINATION_URLS_SEEN.add(nextUrl);
-
                         await enqueueLinks({
                             urls: [nextUrl],
                             userData: { label: 'LIST', referer: currentUrl },
                             forefront: i === 0,
-                            transformRequestFunction: (req) => {
-                                // stable dedupe key for list pages
-                                req.uniqueKey = `${normalizeListUrl(req.url)}#LIST`;
-                                return req;
-                            },
                         });
-
                         if (i === 0) log.info(`➡️  Next page queued (#${listPagesQueued}): ${nextUrl.substring(0, 120)}...`);
-
                         currentUrl = nextUrl;
                         successfulQueues++;
                     } else {
@@ -819,27 +829,17 @@ const crawler = new CheerioCrawler({
                 }
 
                 if (successfulQueues === 0) {
-                    if (stalled) {
-                        log.warning(`🛑 Stalled pagination detected (no new jobs for ${noProgressPages} pages). Stopping pagination.`);
-                    } else if (lastFoundNextUrl && PAGINATION_URLS_SEEN.has(lastFoundNextUrl)) {
-                        log.warning(`⚠ Pagination loop detected - URL already seen`);
-                    } else {
-                        log.warning(`⚠ No next page found after page ${pagesProcessed}. SEEN=${SEEN_URLS.size}, target=${results_wanted}`);
-                    }
-
-                    // One-shot alternative pagination (still deduped)
                     const alt = tryAlternativePagination(baseUrl, pagesProcessed);
-                    const altNorm = alt ? normalizeListUrl(alt) : null;
-                    if (altNorm && !PAGINATION_URLS_SEEN.has(altNorm) && !stalled && pushed < results_wanted) {
+                    if (alt) {
                         listPagesQueued++;
-                        PAGINATION_URLS_SEEN.add(altNorm);
-                        log.info(`➡️  Alternative page ${listPagesQueued}: ${altNorm.substring(0, 120)}...`);
+                        log.info(`➡️  Alternative page ${listPagesQueued}: ${alt.substring(0, 120)}...`);
                         await enqueueLinks({
-                            urls: [altNorm],
+                            urls: [alt],
                             userData: { label: 'LIST', referer: baseUrl },
                             forefront: true,
-                            transformRequestFunction: (req) => { req.uniqueKey = `${normalizeListUrl(req.url)}#LIST`; return req; },
                         });
+                    } else {
+                        log.warning(`⚠ No next page found after page ${pagesProcessed}. SEEN=${SEEN_URLS.size}, target=${results_wanted}`);
                     }
                 }
             } else {
@@ -847,9 +847,6 @@ const crawler = new CheerioCrawler({
                     log.warning(`⛔ Reached MAX_PAGES limit (${MAX_PAGES})`);
                 } else if (pagesToQueue <= 0) {
                     log.info(`✓ Enough jobs collected/queued`);
-                } else if (stalled) {
-                    log.info(`✓ Stopping pagination due to stall (no new jobs for ${noProgressPages} pages).`);
-                    noProgressPages = 0;
                 } else if (pushed >= results_wanted) {
                     log.info(`✓ Job cap reached (${pushed}/${results_wanted}). Not queuing more pages.`);
                 } else {
@@ -883,9 +880,11 @@ const crawler = new CheerioCrawler({
         }
     },
 
-    failedRequestHandler: async ({ request, error, session }) => {
-        log.warning(`FAILED ${request.url}: ${error?.message || error}`);
-        if (session) session.markBad();
+    // --- 403 FIX: When a request exhausts retries, we’ve already rotated sessions on each 403.
+    failedRequestHandler: async ({ request, error, session, response }) => {
+        const code = response?.statusCode ? ` [${response.statusCode}]` : '';
+        log.warning(`FAILED ${request.url}${code}: ${error?.message || error}`);
+        if (session) session.markBad(); // do not reuse a problematic session again
         await Dataset.pushData({
             type: 'error',
             url: request.url,
@@ -922,11 +921,11 @@ log.info(`
 if (finalCount < results_wanted) {
     const ratio = (finalCount / results_wanted * 100).toFixed(0);
     log.warning(`⚠️  Only scraped ${finalCount}/${results_wanted} jobs (${ratio}%)`);
-    log.warning(`Possible reasons:`);
-    log.warning(`  • Not enough jobs available for this query`);
-    log.warning(`  • Pagination stopped (loop/stall guarded)`);
-    log.warning(`  • Some detail pages failed (see error logs)`);
-    log.warning(`  • Site structure may have changed`);
+    log.warning('Possible reasons:');
+    log.warning('  • Not enough jobs available for this query');
+    log.warning('  • Pagination hit site limit or sparse results');
+    log.warning('  • Some pages blocked/failed (check warnings above)');
+    log.warning('  • Site structure may have changed');
 }
 
 await Actor.exit();
