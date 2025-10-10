@@ -210,10 +210,16 @@ const extractNodeHtml = ($node) => {
     const html = STR(clone.html());
     return html || null;
 };
+// =============== Enhanced User-Agent Pool ===============
 const UA_POOL = [
     'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
+    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36',
     'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:122.0) Gecko/20100101 Firefox/122.0',
-    'Mozilla/5.0 (Macintosh; Intel Mac OS X 13_6) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.6 Safari/605.1.15',
+    'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:121.0) Gecko/20100101 Firefox/121.0',
+    'Mozilla/5.0 (Macintosh; Intel Mac OS X 13_6) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.1 Safari/605.1.15',
+    'Mozilla/5.0 (Macintosh; Intel Mac OS X 14_2) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
+    'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
+    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36 Edg/122.0.0.0',
 ];
 const pickUA = () => UA_POOL[Math.floor(Math.random() * UA_POOL.length)];
 const normalizeJobUrl = (u) => {
@@ -261,7 +267,7 @@ const extractJsonLd = ($) => {
     return null;
 };
 
-// =============== Pagination helpers ===============
+// =============== Enhanced Pagination helpers ===============
 const findNextPage = ($, baseUrl) => {
     let href = $('link[rel="next"]').attr('href');
     if (href) {
@@ -270,25 +276,34 @@ const findNextPage = ($, baseUrl) => {
     }
     const sels = [
         'a[rel="next"]',
-        'a[aria-label="Next"]', 'a[aria-label="next"]', 'a[aria-label*="Next"]',
-        'a.next', 'a[class*="next"]', 'li.next a',
+        'a[aria-label="Next"]', 'a[aria-label="next"]', 'a[aria-label*="Next"]', 'a[aria-label*="next"]',
+        'a.next', 'a[class*="next"]', 'a[class*="Next"]', 'li.next a', 'li[class*="next"] a',
         '.pagination__next[href]', '[data-testid*="pagination-next"][href]', 'a[data-testid*="PaginationNext"][href]',
-        'a:contains("Next")', 'a:contains("›")', 'a:contains("»")',
+        'a[data-test*="next"]', 'button[aria-label*="Next"] ~ a', 'nav a[aria-label*="Next"]',
+        'a:contains("Next")', 'a:contains("next")', 'a:contains("›")', 'a:contains("»")', 'a:contains("→")',
     ];
     for (const sel of sels) {
-        const aNext = $(sel).attr('href');
-        if (aNext) {
-            const nextUrl = ABS(aNext, baseUrl);
-            if (nextUrl && nextUrl !== baseUrl) return nextUrl;
+        const $next = $(sel);
+        if ($next.length) {
+            const aNext = $next.attr('href');
+            if (aNext) {
+                const nextUrl = ABS(aNext, baseUrl);
+                if (nextUrl && nextUrl !== baseUrl) return nextUrl;
+            }
         }
     }
     const btns = ['button[aria-label*="Next"]', 'button[class*="next"]', '[role="button"][aria-label*="Next"]'];
     for (const sel of btns) {
         const $btn = $(sel).first();
         if ($btn?.length) {
-            for (const a of ['data-href', 'data-url', 'formaction']) {
+            for (const a of ['data-href', 'data-url', 'formaction', 'onclick']) {
                 const v = $btn.attr(a);
                 if (v) {
+                    const urlMatch = v.match(/https?:\/\/[^\s'"]+/);
+                    if (urlMatch) {
+                        const nextUrl = ABS(urlMatch[0], baseUrl);
+                        if (nextUrl && nextUrl !== baseUrl) return nextUrl;
+                    }
                     const nextUrl = ABS(v, baseUrl);
                     if (nextUrl && nextUrl !== baseUrl) return nextUrl;
                 }
@@ -655,14 +670,20 @@ PAGINATION_URLS_SEEN.clear();
 const crawler = new CheerioCrawler({
     proxyConfiguration: proxyConfig,
     maxConcurrency,
-    maxRequestRetries,
+    maxRequestRetries: maxRequestRetries + 1, // Add one extra retry for 403s
     maxRequestsPerCrawl: MAX_REQS,
     requestHandlerTimeoutSecs,
-    navigationTimeoutSecs: requestHandlerTimeoutSecs,
+    navigationTimeoutSecs: requestHandlerTimeoutSecs + 10,
     useSessionPool: true,
     persistCookiesPerSession: true,
-    sessionPoolOptions: { maxPoolSize: 50, sessionOptions: { maxUsageCount: 50 } },
-    autoscaledPoolOptions: { maybeRunIntervalSecs: 0.5, minConcurrency: 1 },
+    sessionPoolOptions: { 
+        maxPoolSize: 100, // Increased for better rotation
+        sessionOptions: { 
+            maxUsageCount: 30, // Rotate sessions more frequently
+            maxErrorScore: 3,
+        } 
+    },
+    autoscaledPoolOptions: { maybeRunIntervalSecs: 0.3, minConcurrency: 2 },
 
     preNavigationHooks: [
         async (ctx) => {
@@ -677,26 +698,45 @@ const crawler = new CheerioCrawler({
             if (proxyInfo?.isApifyProxy && session?.id) {
                 request.proxy = { ...(request.proxy || {}), session: session.id };
             }
-            if (session && !session.userData.ua) session.userData.ua = UA_POOL[Math.floor(Math.random() * UA_POOL.length)];
+            
+            // Enhanced session-based UA rotation
+            if (session && !session.userData.ua) {
+                session.userData.ua = pickUA();
+                session.userData.acceptLanguage = Math.random() > 0.5 ? 'en-US,en;q=0.9' : 'en-GB,en;q=0.9,en-US;q=0.8';
+            }
             const ua = session?.userData?.ua || pickUA();
+            const acceptLang = session?.userData?.acceptLanguage || 'en-US,en;q=0.9';
             const referer = request.userData?.referer || 'https://www.google.com/';
 
+            // Enhanced headers with randomization
             const headers = {
                 'user-agent': ua,
-                'accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
-                'accept-language': 'en-US,en;q=0.9',
+                'accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
+                'accept-language': acceptLang,
+                'accept-encoding': 'gzip, deflate, br',
                 'upgrade-insecure-requests': '1',
-                'cache-control': 'no-cache',
-                'pragma': 'no-cache',
+                'cache-control': 'max-age=0',
+                'sec-fetch-dest': 'document',
+                'sec-fetch-mode': 'navigate',
+                'sec-fetch-site': Math.random() > 0.5 ? 'none' : 'same-origin',
+                'sec-fetch-user': '?1',
+                'sec-ch-ua': ua.includes('Chrome') ? '"Chromium";v="122", "Not(A:Brand";v="24", "Google Chrome";v="122"' : undefined,
+                'sec-ch-ua-mobile': '?0',
+                'sec-ch-ua-platform': ua.includes('Windows') ? '"Windows"' : ua.includes('Mac') ? '"macOS"' : '"Linux"',
                 'referer': referer,
             };
+            
+            // Remove undefined headers
+            Object.keys(headers).forEach(key => headers[key] === undefined && delete headers[key]);
+
             if (ctx.gotOptions) ctx.gotOptions.headers = { ...(ctx.gotOptions.headers || {}), ...headers };
             if (ctx.requestOptions) ctx.requestOptions.headers = { ...(ctx.requestOptions.headers || {}), ...headers };
             request.headers = { ...(request.headers || {}), ...headers };
 
+            // Reduced delay with jitter for better performance
             if (downloadIntervalMs) {
-                const jitter = Math.floor(Math.random() * 60);
-                await sleep(downloadIntervalMs + jitter);
+                const jitter = Math.floor(Math.random() * 40);
+                await sleep(Math.max(50, downloadIntervalMs - 50) + jitter);
             }
         },
     ],
@@ -705,17 +745,24 @@ const crawler = new CheerioCrawler({
         const { request, $, enqueueLinks, session, response } = ctx;
         const { label } = request.userData;
 
-        // fast block detection (avoid full-body scans)
-        if (response?.statusCode === 403) {
-            log.warning(`403 on ${request.url} — retire session ${session?.id}`);
-            if (session) session.markBad();
-            throw new Error('Blocked (403)');
+        // Enhanced block detection with session rotation
+        if (response?.statusCode === 403 || response?.statusCode === 429) {
+            log.warning(`${response.statusCode} on ${request.url} — rotating session ${session?.id}`);
+            if (session) {
+                session.retire();
+                session.markBad();
+            }
+            throw new Error(`Blocked (${response.statusCode})`);
         }
-        const bodyText = ($('title').text() + ' ' + $('.error, .captcha, #challenge-running').text()).toLowerCase();
-        if (bodyText.includes('blocked') || bodyText.includes('access denied') || bodyText.includes('verify you are a human')) {
-            log.warning(`Bot page on ${request.url} — retire session ${session?.id}`);
-            if (session) session.markBad();
-            throw new Error('Blocked (bot page)');
+        
+        const bodyText = ($('title').text() + ' ' + $('.error, .captcha, #challenge-running, .cf-error-details').text()).toLowerCase();
+        if (bodyText.includes('blocked') || bodyText.includes('access denied') || bodyText.includes('verify you are a human') || bodyText.includes('cloudflare')) {
+            log.warning(`Bot detection on ${request.url} — rotating session ${session?.id}`);
+            if (session) {
+                session.retire();
+                session.markBad();
+            }
+            throw new Error('Blocked (bot detection)');
         }
 
         if (!label || label === 'LIST') {
@@ -769,11 +816,11 @@ const crawler = new CheerioCrawler({
             if (newAdded === 0) noProgressPages += 1; else noProgressPages = 0;
             const stalled = noProgressPages >= STALL_LIMIT;
 
-            // pagination planning
+            // Enhanced pagination planning with higher lookahead
             const estimatedJobsPerPage = cards.length > 0 ? cards.length : 20;
             const remainingNeeded = results_wanted - SEEN_URLS.size;
             const pagesNeeded = Math.ceil(Math.max(0, remainingNeeded) / Math.max(1, estimatedJobsPerPage));
-            const pagesToQueue = Math.min(3, Math.max(0, pagesNeeded));
+            const pagesToQueue = Math.min(5, Math.max(0, pagesNeeded)); // Increased from 3 to 5
 
             const shouldContinue = SEEN_URLS.size < results_wanted * 1.5 &&
                                    pagesProcessed < MAX_PAGES &&
@@ -801,7 +848,7 @@ const crawler = new CheerioCrawler({
                         await enqueueLinks({
                             urls: [nextUrl],
                             userData: { label: 'LIST', referer: currentUrl },
-                            forefront: i === 0,
+                            forefront: i < 2, // Prioritize first 2 pages
                             transformRequestFunction: (req) => {
                                 // stable dedupe key for list pages
                                 req.uniqueKey = `${normalizeListUrl(req.url)}#LIST`;
@@ -827,7 +874,7 @@ const crawler = new CheerioCrawler({
                         log.warning(`⚠ No next page found after page ${pagesProcessed}. SEEN=${SEEN_URLS.size}, target=${results_wanted}`);
                     }
 
-                    // One-shot alternative pagination (still deduped)
+                    // Enhanced alternative pagination with multiple fallbacks
                     const alt = tryAlternativePagination(baseUrl, pagesProcessed);
                     const altNorm = alt ? normalizeListUrl(alt) : null;
                     if (altNorm && !PAGINATION_URLS_SEEN.has(altNorm) && !stalled && pushed < results_wanted) {
@@ -884,16 +931,27 @@ const crawler = new CheerioCrawler({
     },
 
     failedRequestHandler: async ({ request, error, session }) => {
-        log.warning(`FAILED ${request.url}: ${error?.message || error}`);
-        if (session) session.markBad();
+        const statusCode = error?.statusCode || error?.response?.statusCode;
+        const is403or429 = statusCode === 403 || statusCode === 429;
+        
+        if (is403or429 && session) {
+            log.warning(`Blocking error ${statusCode} for ${request.url} - session ${session.id} retired`);
+            session.retire();
+        } else {
+            log.warning(`FAILED ${request.url}: ${error?.message || error}`);
+            if (session) session.markBad();
+        }
+        
         await Dataset.pushData({
             type: 'error',
             url: request.url,
             message: String(error?.message || error),
+            statusCode: statusCode || null,
             label: request.userData?.label || null,
             at: new Date().toISOString(),
         });
     },
+
 });
 
 log.info(`🚀 Starting crawler with target: ${results_wanted} jobs`);
