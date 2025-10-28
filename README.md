@@ -1,53 +1,71 @@
 # ZipRecruiter Jobs Scraper
 
-A fast and robust scraper for extracting job listings from ZipRecruiter. It can perform a keyword-based search or start from any ZipRecruiter jobs URL. The actor is designed to be resilient, bypass blocking, and retrieve detailed information for each job, including full descriptions, salary data, and application details.
+## Description
+
+This Apify actor provides a fast and robust solution for extracting job listings from ZipRecruiter. It supports keyword-based searches or starting from any ZipRecruiter jobs URL, ensuring resilience against blocking while retrieving detailed job information, including descriptions, salaries, and application details.
 
 ## Key Features
 
-*   **Comprehensive Data Extraction**: Scrapes all key job details, including:
-    *   Full Job Description (in both HTML and plain text)
-    *   Salary Range (min, max, period)
-    *   Company Name and Location
-    *   Date Posted and Employment Type
-    *   Direct Apply Flag (when available)
-    *   Structured JSON-LD data for technical users.
+- **Comprehensive Data Extraction**: Captures all essential job details, such as:
+  - Full job description (HTML and plain text formats).
+  - Salary range (minimum, maximum, and period).
+  - Company name, location, date posted, and employment type.
+  - Direct apply flag and structured JSON-LD data.
 
-*   **Flexible Starting Options**:
-    *   Use the `keyword` and `location` inputs to perform a new search.
-    *   Provide a specific `startUrl` to scrape from a pre-defined search results page, category, or company page.
+- **Flexible Starting Options**:
+  - Perform searches using keywords and locations.
+  - Start from a specific ZipRecruiter URL for targeted scraping.
 
-*   **Robust Pagination & Deduplication**:
-    *   Intelligently navigates through all pages until the desired number of jobs (`results_wanted`) is found.
-    *   Handles multiple URL structures used by ZipRecruiter for maximum compatibility.
-    *   Ensures no duplicate jobs are collected, even if they appear on multiple pages.
+- **Robust Pagination and Deduplication**:
+  - Navigates all pages to reach the desired number of results.
+  - Handles various URL structures for compatibility.
+  - Prevents duplicate entries.
 
-*   **Two Scraping Modes**:
-    *   **Full Detail Mode** (`collect_details: true`): Clicks into each job to scrape the full description and all available data. (Default)
-    *   **Fast List Mode** (`collect_details: false`): Scrapes only the information available on the search results pages for a much faster run.
+- **Scraping Modes**:
+  - **Full Detail Mode**: Visits each job page for complete data (default).
+  - **Fast List Mode**: Extracts data from search results only for speed.
 
-*   **Anti-Blocking & Stealth**:
-    *   Uses a pool of browser-like user agents.
-    *   Manages cookies and sessions to appear as a legitimate user.
-    *   Built-in support for Apify's residential proxies to avoid IP-based blocks.
-    *   Configurable request intervals to be polite to the server.
+- **Anti-Blocking Measures**:
+  - Rotates user agents and manages sessions.
+  - Supports residential proxies.
+  - Configurable request intervals for politeness.
 
-## Input Configuration
+## Input
 
-The actor can be configured using the following input fields:
+Configure the actor with the following fields:
 
 | Field | Type | Description |
 |---|---|---|
-| `startUrl` | `string` | A specific ZipRecruiter URL to start from. Overrides `keyword` and `location`. |
-| `keyword` | `string` | The job title, skill, or keyword to search for (e.g., "Software Engineer"). |
-| `location` | `string` | The city, state, or country to search in (e.g., "New York, NY", "Remote"). |
-| `results_wanted` | `integer` | The total number of unique job listings you want to scrape. |
-| `collect_details` | `boolean` | If `true`, the actor will visit each job's detail page for more data. |
-| `preferCandidateSearch` | `boolean` | If `true`, uses an alternative URL structure (`/candidate/search`) which can be more stable. |
-| `maxConcurrency` | `integer` | The number of parallel requests. Keep this low (1-3) to avoid blocks. |
-| `downloadIntervalMs` | `integer` | Milliseconds to wait between requests. Increase this if you encounter blocks. |
-| `proxyConfiguration` | `object` | Proxy settings. Residential proxies are highly recommended. |
+| `startUrl` | `string` | Optional. A specific ZipRecruiter URL to begin scraping from. Overrides `keyword` and `location`. |
+| `keyword` | `string` | Optional. Job title, skill, or keyword for search (e.g., "Software Engineer"). |
+| `location` | `string` | Optional. City, state, or region (e.g., "New York, NY" or "Remote"). |
+| `results_wanted` | `integer` | Required. Total unique jobs to scrape. |
+| `collect_details` | `boolean` | Optional. Set to `true` for full details (default); `false` for fast mode. |
+| `preferCandidateSearch` | `boolean` | Optional. Use alternative URL structure for stability. |
+| `maxConcurrency` | `integer` | Optional. Number of parallel requests (1-3 recommended). |
+| `downloadIntervalMs` | `integer` | Optional. Delay between requests in milliseconds. |
+| `proxyConfiguration` | `object` | Optional. Proxy settings (residential proxies advised). |
 
-### Example Input
+## Output
+
+The actor outputs job data in JSON format, with each item containing fields like `title`, `company`, `location`, `description`, `salary`, and more. Results are deduplicated and paginated.
+
+## Usage
+
+1. **Basic Search**: Provide `keyword` and `location` to start a new search.
+2. **Custom URL**: Use `startUrl` for specific pages.
+3. **Mode Selection**: Enable `collect_details` for in-depth data or disable for quick lists.
+4. **Run the Actor**: Input your configuration and execute on Apify.
+
+### Configuration Tips
+
+- For large result sets, increase `downloadIntervalMs` to avoid rate limits.
+- Use residential proxies in `proxyConfiguration` to bypass blocks.
+- Set `maxConcurrency` low for stability.
+
+## Examples
+
+### Example 1: Keyword Search for Remote Data Analyst Jobs
 
 ```json
 {
@@ -61,3 +79,24 @@ The actor can be configured using the following input fields:
   }
 }
 ```
+
+### Example 2: Fast Mode from a Specific URL
+
+```json
+{
+  "startUrl": "https://www.ziprecruiter.com/jobs-search?search=engineer&location=San+Francisco%2C+CA",
+  "results_wanted": 50,
+  "collect_details": false,
+  "maxConcurrency": 2,
+  "downloadIntervalMs": 1000
+}
+```
+
+## Limitations
+
+- Results depend on ZipRecruiter's availability and changes.
+- High concurrency may trigger blocks; adjust settings accordingly.
+
+## Support
+
+For issues or questions, refer to Apify's documentation or community forums.
