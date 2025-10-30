@@ -210,18 +210,6 @@ const extractNodeHtml = ($node) => {
     const html = STR(clone.html());
     return html || null;
 };
-// =============== Enhanced User-Agent Pool ===============
-const UA_POOL = [
-    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
-    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36',
-    'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:122.0) Gecko/20100101 Firefox/122.0',
-    'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:121.0) Gecko/20100101 Firefox/121.0',
-    'Mozilla/5.0 (Macintosh; Intel Mac OS X 13_6) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.1 Safari/605.1.15',
-    'Mozilla/5.0 (Macintosh; Intel Mac OS X 14_2) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
-    'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
-    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36 Edg/122.0.0.0',
-];
-const pickUA = () => UA_POOL[Math.floor(Math.random() * UA_POOL.length)];
 const normalizeJobUrl = (u) => {
     try {
         const url = new URL(u);
@@ -621,11 +609,11 @@ let {
     postedWithin = 'any',
     results_wanted = 100,
     collect_details = true,
-    maxConcurrency = 10,
-    maxRequestRetries = 2,
+    maxConcurrency = 20,
+    maxRequestRetries = 5,
     proxyConfiguration = { useApifyProxy: true, apifyProxyGroups: ['RESIDENTIAL'], countryCode: 'US' },
-    requestHandlerTimeoutSecs = 35,
-    downloadIntervalMs: downloadIntervalMsInput = null,
+    requestHandlerTimeoutSecs = 60,
+    downloadIntervalMs: downloadIntervalMsInput = 100,
     preferCandidateSearch = false,
     // optional caps / aliases (no schema change)
     maxJobs,
@@ -676,12 +664,12 @@ const crawler = new CheerioCrawler({
     navigationTimeoutSecs: requestHandlerTimeoutSecs + 10,
     useSessionPool: true,
     persistCookiesPerSession: true,
-    sessionPoolOptions: { 
-        maxPoolSize: 100, // Increased for better rotation
-        sessionOptions: { 
-            maxUsageCount: 30, // Rotate sessions more frequently
+    sessionPoolOptions: {
+        maxPoolSize: 200, // Increased for better rotation
+        sessionOptions: {
+            maxUsageCount: 20, // Rotate sessions more frequently
             maxErrorScore: 3,
-        } 
+        },
     },
     autoscaledPoolOptions: { maybeRunIntervalSecs: 0.3, minConcurrency: 2 },
 
@@ -699,45 +687,20 @@ const crawler = new CheerioCrawler({
                 request.proxy = { ...(request.proxy || {}), session: session.id };
             }
             
-            // Enhanced session-based UA rotation
-            if (session && !session.userData.ua) {
-                session.userData.ua = pickUA();
-                session.userData.acceptLanguage = Math.random() > 0.5 ? 'en-US,en;q=0.9' : 'en-GB,en;q=0.9,en-US;q=0.8';
+            if (ctx.gotOptions) {
+                ctx.gotOptions.headers ??= {};
+                ctx.gotOptions.headers.referer = request.userData?.referer || 'https://www.google.com/';
+                ctx.gotOptions.headerGeneratorOptions = {
+                    devices: ['mobile', 'desktop'],
+                    locales: ['en-US', 'en'],
+                    operatingSystems: ['windows', 'macos', 'linux', 'android', 'ios'],
+                    browsers: ['chrome', 'firefox', 'safari', 'edge'],
+                };
             }
-            const ua = session?.userData?.ua || pickUA();
-            const acceptLang = session?.userData?.acceptLanguage || 'en-US,en;q=0.9';
-            const referer = request.userData?.referer || 'https://www.google.com/';
 
-            // Enhanced headers with randomization
-            const headers = {
-                'user-agent': ua,
-                'accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
-                'accept-language': acceptLang,
-                'accept-encoding': 'gzip, deflate, br',
-                'upgrade-insecure-requests': '1',
-                'cache-control': 'max-age=0',
-                'sec-fetch-dest': 'document',
-                'sec-fetch-mode': 'navigate',
-                'sec-fetch-site': Math.random() > 0.5 ? 'none' : 'same-origin',
-                'sec-fetch-user': '?1',
-                'sec-ch-ua': ua.includes('Chrome') ? '"Chromium";v="122", "Not(A:Brand";v="24", "Google Chrome";v="122"' : undefined,
-                'sec-ch-ua-mobile': '?0',
-                'sec-ch-ua-platform': ua.includes('Windows') ? '"Windows"' : ua.includes('Mac') ? '"macOS"' : '"Linux"',
-                'referer': referer,
-            };
-            
-            // Remove undefined headers
-            Object.keys(headers).forEach(key => headers[key] === undefined && delete headers[key]);
-
-            if (ctx.gotOptions) ctx.gotOptions.headers = { ...(ctx.gotOptions.headers || {}), ...headers };
-            if (ctx.requestOptions) ctx.requestOptions.headers = { ...(ctx.requestOptions.headers || {}), ...headers };
-            request.headers = { ...(request.headers || {}), ...headers };
-
-            // Reduced delay with jitter for better performance
-            if (downloadIntervalMs) {
-                const jitter = Math.floor(Math.random() * 40);
-                await sleep(Math.max(50, downloadIntervalMs - 50) + jitter);
-            }
+            // Randomized delay to mimic human browsing
+            const delay = Math.floor(Math.random() * 5000) + 3000;
+            await sleep(delay);
         },
     ],
 
@@ -932,24 +895,17 @@ const crawler = new CheerioCrawler({
 
     failedRequestHandler: async ({ request, error, session }) => {
         const statusCode = error?.statusCode || error?.response?.statusCode;
-        const is403or429 = statusCode === 403 || statusCode === 429;
-        
-        if (is403or429 && session) {
-            log.warning(`Blocking error ${statusCode} for ${request.url} - session ${session.id} retired`);
+        const isBlocking = statusCode === 403 || statusCode === 429;
+
+        if (isBlocking && session) {
+            log.warning(`Blocking error ${statusCode} for ${request.url} - retiring session ${session.id}`);
             session.retire();
         } else {
-            log.warning(`FAILED ${request.url}: ${error?.message || error}`);
-            if (session) session.markBad();
+            log.warning(`Request failed: ${request.url} with error: ${error?.message || 'Unknown error'}`);
+            if (session) {
+                session.markBad();
+            }
         }
-        
-        await Dataset.pushData({
-            type: 'error',
-            url: request.url,
-            message: String(error?.message || error),
-            statusCode: statusCode || null,
-            label: request.userData?.label || null,
-            at: new Date().toISOString(),
-        });
     },
 
 });
