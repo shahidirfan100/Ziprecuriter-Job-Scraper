@@ -372,44 +372,6 @@ const computeDelayMs = (label = 'DEFAULT', configuredInterval, retryCount = 0) =
         : 0;
     return Math.round(baseTarget + networkLatency + humanPause + retryBackoff);
 };
-
-const flushPendingCardsToDataset = async ({
-    collectDetails,
-    targetCount,
-    searchUrl,
-    currentCount,
-}) => {
-    if (!collectDetails) return { emitted: 0 };
-    const remaining = targetCount - currentCount;
-    if (remaining <= 0) return { emitted: 0 };
-    if (CARD_CACHE.size === 0) return { emitted: 0 };
-
-    const fallbackEntries = [];
-    for (const [url, info] of CARD_CACHE.entries()) {
-        if (!info || !info.card) continue;
-        fallbackEntries.push({ url, info });
-        if (fallbackEntries.length >= remaining) break;
-    }
-
-    if (fallbackEntries.length === 0) return { emitted: 0 };
-
-    let emitted = 0;
-    for (const { url, info } of fallbackEntries) {
-        const record = buildOutputRecord({
-            searchUrl,
-            scrapedAt: info.discoveredAt || new Date().toISOString(),
-            url,
-            referer: info.referer,
-            card: info.card,
-            detail: { detail_url: url },
-        });
-        await Dataset.pushData(record);
-        CARD_CACHE.delete(url);
-        emitted++;
-    }
-
-    return { emitted };
-};
 const normalizeJobUrl = (u) => {
     try {
         const url = new URL(u);
@@ -855,7 +817,6 @@ const MAX_PAGES = 50;
 const MAX_STALL_RECOVERY = 4;
 let stallRecoveryAttempts = 0;
 let lastListUrlNorm = null;
-const CARD_CACHE = new Map();
 
 // PATCH: derived ceiling to prevent "requests storm" when site loops
 const MAX_REQS = Number.isFinite(maxRequestsPerCrawl) && maxRequestsPerCrawl > 0
@@ -1015,11 +976,6 @@ const crawler = new CheerioCrawler({
                 } else {
                     if (!QUEUED_DETAILS.has(norm)) {
                         QUEUED_DETAILS.add(norm);
-                        CARD_CACHE.set(norm, {
-                            card,
-                            referer: baseUrl,
-                            discoveredAt: new Date().toISOString(),
-                        });
                         await enqueueLinks({
                             urls: [norm],
                             userData: { label: 'DETAIL', card, referer: baseUrl, originListUrl: baseUrl },
@@ -1173,16 +1129,14 @@ const crawler = new CheerioCrawler({
 
             const base = request.loadedUrl ?? request.url;
             const detail = scrapeDetail($, base);
-            const normalizedUrl = normalizeJobUrl(base);
             const record = buildOutputRecord({
                 searchUrl: START_URL,
                 scrapedAt: new Date().toISOString(),
-                url: normalizedUrl,
+                url: normalizeJobUrl(base),
                 referer: request.userData.referer,
                 card: request.userData.card || {},
                 detail,
             });
-            CARD_CACHE.delete(normalizedUrl);
             await Dataset.pushData(record);
             pushed++;
 
@@ -1221,17 +1175,6 @@ log.info(`🚀 Starting crawler with target: ${results_wanted} jobs`);
 log.info(`📍 Start URL: ${START_URL}`);
 
 await crawler.run([{ url: START_URL, userData: { label: 'LIST', referer: buildSearchReferer() } }]);
-
-const { emitted: fallbackEmitted } = await flushPendingCardsToDataset({
-    collectDetails: collect_details,
-    targetCount: results_wanted,
-    searchUrl: START_URL,
-    currentCount: pushed,
-});
-if (fallbackEmitted > 0) {
-    pushed += fallbackEmitted;
-    log.info(`Fallback emitted ${fallbackEmitted} card-only record(s) to approach requested total.`);
-}
 
 // =============== Final report ===============
 const finalCount = pushed;
