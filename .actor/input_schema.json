@@ -85,24 +85,6 @@
       "maximum": 5000,
       "nullable": true
     },
-    "maxRequestRetries": {
-      "title": "Max Request Retries",
-      "type": "integer",
-      "description": "Number of times to retry failed requests.",
-      "editor": "number",
-      "default": 2,
-      "minimum": 0,
-      "maximum": 10
-    },
-    "requestHandlerTimeoutSecs": {
-      "title": "Request Handler Timeout (seconds)",
-      "type": "integer",
-      "description": "Maximum time to wait for each request to complete.",
-      "editor": "number",
-      "default": 35,
-      "minimum": 10,
-      "maximum": 120
-    },
     "proxyConfiguration": {
       "title": "Proxy Configuration",
       "type": "object",

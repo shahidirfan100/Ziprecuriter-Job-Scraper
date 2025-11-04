@@ -210,18 +210,168 @@ const extractNodeHtml = ($node) => {
     const html = STR(clone.html());
     return html || null;
 };
-// =============== Enhanced User-Agent Pool ===============
-const UA_POOL = [
-    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
-    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36',
-    'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:122.0) Gecko/20100101 Firefox/122.0',
-    'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:121.0) Gecko/20100101 Firefox/121.0',
-    'Mozilla/5.0 (Macintosh; Intel Mac OS X 13_6) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.1 Safari/605.1.15',
-    'Mozilla/5.0 (Macintosh; Intel Mac OS X 14_2) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
-    'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
-    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36 Edg/122.0.0.0',
+// =============== Random helpers ===============
+const randomInt = (min, max) => Math.floor(Math.random() * (max - min + 1)) + min;
+const randomFloat = (min, max) => Math.random() * (max - min) + min;
+const pickOne = (arr) => arr[Math.floor(Math.random() * arr.length)];
+
+// =============== Enhanced User-Agent Profiles (Oct 2025) ===============
+const UA_PROFILES = [
+    {
+        ua: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.6723.91 Safari/537.36',
+        ch: {
+            'sec-ch-ua': '"Not.A/Brand";v="99", "Chromium";v="130", "Google Chrome";v="130"',
+            'sec-ch-ua-full-version-list': '"Not.A/Brand";v="99.0.0.0", "Chromium";v="130.0.6723.91", "Google Chrome";v="130.0.6723.91"',
+            'sec-ch-ua-platform': '"Windows"',
+            'sec-ch-ua-platform-version': '"15.0.0"',
+            'sec-ch-ua-mobile': '?0',
+            'sec-ch-ua-arch': '"x86"',
+            'sec-ch-ua-bitness': '"64"',
+            'sec-ch-ua-model': '""',
+        },
+    },
+    {
+        ua: 'Mozilla/5.0 (Macintosh; Intel Mac OS X 14_5) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.6723.70 Safari/537.36',
+        ch: {
+            'sec-ch-ua': '"Not.A/Brand";v="99", "Chromium";v="130", "Google Chrome";v="130"',
+            'sec-ch-ua-full-version-list': '"Not.A/Brand";v="99.0.0.0", "Chromium";v="130.0.6723.70", "Google Chrome";v="130.0.6723.70"',
+            'sec-ch-ua-platform': '"macOS"',
+            'sec-ch-ua-platform-version': '"14.5.0"',
+            'sec-ch-ua-mobile': '?0',
+            'sec-ch-ua-arch': '"x86"',
+            'sec-ch-ua-bitness': '"64"',
+            'sec-ch-ua-model': '""',
+        },
+    },
+    {
+        ua: 'Mozilla/5.0 (Macintosh; Intel Mac OS X 14_5) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.0 Safari/605.1.15',
+        ch: {
+            'sec-ch-ua': '"Not.A/Brand";v="99", "Safari";v="18"',
+            'sec-ch-ua-full-version-list': '"Not.A/Brand";v="99.0.0.0", "Safari";v="18.0.0.0"',
+            'sec-ch-ua-platform': '"macOS"',
+            'sec-ch-ua-platform-version': '"14.5.0"',
+            'sec-ch-ua-mobile': '?0',
+            'sec-ch-ua-arch': '"x86"',
+            'sec-ch-ua-bitness': '"64"',
+            'sec-ch-ua-model': '""',
+        },
+    },
+    {
+        ua: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:130.0) Gecko/20100101 Firefox/130.0',
+        ch: {
+            'sec-ch-ua': '"Not.A/Brand";v="99", "Firefox";v="130"',
+            'sec-ch-ua-full-version-list': '"Not.A/Brand";v="99.0.0.0", "Firefox";v="130.0.0.0"',
+            'sec-ch-ua-platform': '"Windows"',
+            'sec-ch-ua-platform-version': '"15.0.0"',
+            'sec-ch-ua-mobile': '?0',
+            'sec-ch-ua-arch': '"x86"',
+            'sec-ch-ua-bitness': '"64"',
+            'sec-ch-ua-model': '""',
+        },
+    },
+    {
+        ua: 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.6723.63 Safari/537.36',
+        ch: {
+            'sec-ch-ua': '"Not.A/Brand";v="99", "Chromium";v="130", "Google Chrome";v="130"',
+            'sec-ch-ua-full-version-list': '"Not.A/Brand";v="99.0.0.0", "Chromium";v="130.0.6723.63", "Google Chrome";v="130.0.6723.63"',
+            'sec-ch-ua-platform': '"Linux"',
+            'sec-ch-ua-platform-version': '"6.9.0"',
+            'sec-ch-ua-mobile': '?0',
+            'sec-ch-ua-arch': '"x86"',
+            'sec-ch-ua-bitness': '"64"',
+            'sec-ch-ua-model': '""',
+        },
+    },
 ];
-const pickUA = () => UA_POOL[Math.floor(Math.random() * UA_POOL.length)];
+const pickUAProfile = () => pickOne(UA_PROFILES);
+
+const ACCEPT_LANGUAGE_POOL = [
+    'en-US,en;q=0.9',
+    'en-US,en;q=0.9,en-GB;q=0.8',
+    'en-GB,en;q=0.9,en-US;q=0.7',
+    'en-CA,en;q=0.9,en-US;q=0.8',
+    'en-AU,en;q=0.9,en-US;q=0.8',
+];
+
+const SEARCH_QUERIES = [
+    'ziprecruiter job listings',
+    'latest tech jobs ziprecruiter',
+    'remote software engineer openings',
+    'ziprecruiter hiring today',
+    'marketing coordinator roles ziprecruiter',
+    'sales manager postings ziprecruiter',
+    'data analyst positions ziprecruiter',
+];
+
+const SEARCH_ENGINES = [
+    (q) => `https://www.google.com/search?q=${encodeURIComponent(q)}`,
+    (q) => `https://www.bing.com/search?q=${encodeURIComponent(q)}`,
+    (q) => `https://duckduckgo.com/?q=${encodeURIComponent(q)}`,
+];
+
+const BROWSING_REFERERS = [
+    'https://www.linkedin.com/jobs/',
+    'https://news.google.com/',
+    'https://www.facebook.com/',
+    'https://www.reddit.com/r/jobs/',
+    'https://www.youtube.com/',
+];
+
+const buildSearchReferer = () => {
+    const query = pickOne(SEARCH_QUERIES);
+    const engine = pickOne(SEARCH_ENGINES);
+    return engine(query);
+};
+
+const ensureRefererChain = (request) => {
+    const existing = request.userData?.referer;
+    if (existing) return existing;
+    const label = request.userData?.label ?? 'LIST';
+    let referer = null;
+    if (label === 'DETAIL') {
+        referer = request.userData?.originListUrl || buildSearchReferer();
+    } else if (label === 'LIST') {
+        referer = buildSearchReferer();
+    } else {
+        referer = pickOne([buildSearchReferer(), pickOne(BROWSING_REFERERS)]);
+    }
+    request.userData = { ...(request.userData || {}), referer };
+    return referer;
+};
+
+const computeFetchSite = (targetUrl, referer) => {
+    if (!referer) return 'none';
+    try {
+        const targetHost = new URL(targetUrl).hostname.replace(/^www\./, '');
+        const refererHost = new URL(referer).hostname.replace(/^www\./, '');
+        if (targetHost === refererHost) return 'same-origin';
+        return 'cross-site';
+    } catch {
+        return 'cross-site';
+    }
+};
+
+const TIMING_PROFILES = {
+    LIST: { base: 240, networkRange: [70, 150], humanPauseChance: 0.12, humanPauseRange: [420, 860] },
+    DETAIL: { base: 360, networkRange: [90, 210], humanPauseChance: 0.3, humanPauseRange: [720, 1500] },
+    DEFAULT: { base: 280, networkRange: [70, 180], humanPauseChance: 0.18, humanPauseRange: [520, 1100] },
+};
+
+const computeDelayMs = (label = 'DEFAULT', configuredInterval, retryCount = 0) => {
+    const profile = TIMING_PROFILES[label] || TIMING_PROFILES.DEFAULT;
+    const baseTarget = configuredInterval
+        ? randomFloat(configuredInterval * 0.85, configuredInterval * 1.3)
+        : randomFloat(profile.base * 0.7, profile.base * 1.35);
+    const networkLatency = randomInt(profile.networkRange[0], profile.networkRange[1]);
+    const humanPause = Math.random() < profile.humanPauseChance
+        ? randomInt(profile.humanPauseRange[0], profile.humanPauseRange[1])
+        : 0;
+    const cappedRetry = Math.min(retryCount, 5);
+    const retryBackoff = retryCount > 0
+        ? Math.min(4500, Math.pow(2, cappedRetry) * 110 + randomInt(60, 220))
+        : 0;
+    return Math.round(baseTarget + networkLatency + humanPause + retryBackoff);
+};
 const normalizeJobUrl = (u) => {
     try {
         const url = new URL(u);
@@ -650,6 +800,13 @@ let START_URL = startUrl?.trim()
 const postedLabel = postedWithinDays ? `<=${postedWithinDays}d` : 'any';
 log.info(`ZipRecruiter: ${START_URL} | details: ${collect_details ? 'ON' : 'OFF'} | target: ${results_wanted} | posted: ${postedLabel}`);
 
+const STEALTH_CONCURRENCY_CAP = collect_details ? 6 : 8;
+const effectiveMaxConcurrency = Math.max(2, Math.min(maxConcurrency, STEALTH_CONCURRENCY_CAP));
+if (effectiveMaxConcurrency !== maxConcurrency) {
+    log.info(`Stealth tuning: capping maxConcurrency ${maxConcurrency} -> ${effectiveMaxConcurrency}`);
+}
+maxConcurrency = effectiveMaxConcurrency;
+
 // ===== run state =====
 let pushed = 0;
 const SEEN_URLS = new Set();
@@ -670,18 +827,20 @@ PAGINATION_URLS_SEEN.clear();
 const crawler = new CheerioCrawler({
     proxyConfiguration: proxyConfig,
     maxConcurrency,
-    maxRequestRetries: maxRequestRetries + 1, // Add one extra retry for 403s
+    maxRequestRetries: Math.max(3, maxRequestRetries + 2), // Add headroom for stealth backoff
     maxRequestsPerCrawl: MAX_REQS,
     requestHandlerTimeoutSecs,
     navigationTimeoutSecs: requestHandlerTimeoutSecs + 10,
     useSessionPool: true,
     persistCookiesPerSession: true,
-    sessionPoolOptions: { 
-        maxPoolSize: 100, // Increased for better rotation
-        sessionOptions: { 
-            maxUsageCount: 30, // Rotate sessions more frequently
-            maxErrorScore: 3,
-        } 
+    sessionPoolOptions: {
+        maxPoolSize: Math.max(48, effectiveMaxConcurrency * 14),
+        sessionOptions: {
+            maxUsageCount: 12,
+            maxAgeSecs: 420,
+            errorScoreDecrement: 0.5,
+            maxErrorScore: 2.2,
+        },
     },
     autoscaledPoolOptions: { maybeRunIntervalSecs: 0.3, minConcurrency: 2 },
 
@@ -698,17 +857,28 @@ const crawler = new CheerioCrawler({
             if (proxyInfo?.isApifyProxy && session?.id) {
                 request.proxy = { ...(request.proxy || {}), session: session.id };
             }
-            
-            // Enhanced session-based UA rotation
-            if (session && !session.userData.ua) {
-                session.userData.ua = pickUA();
-                session.userData.acceptLanguage = Math.random() > 0.5 ? 'en-US,en;q=0.9' : 'en-GB,en;q=0.9,en-US;q=0.8';
-            }
-            const ua = session?.userData?.ua || pickUA();
-            const acceptLang = session?.userData?.acceptLanguage || 'en-US,en;q=0.9';
-            const referer = request.userData?.referer || 'https://www.google.com/';
 
-            // Enhanced headers with randomization
+            // Enhanced session-based UA rotation
+            if (session) {
+                const usageCount = session.usageCount ?? 0;
+                session.userData = session.userData || {};
+                if (!session.userData.uaProfile || usageCount > 8) {
+                    session.userData.uaProfile = pickUAProfile();
+                }
+                if (!session.userData.acceptLanguage) {
+                    session.userData.acceptLanguage = pickOne(ACCEPT_LANGUAGE_POOL);
+                }
+                if (usageCount > 10 && Math.random() < 0.35) {
+                    session.retire();
+                }
+            }
+
+            const profile = session?.userData?.uaProfile || pickUAProfile();
+            const ua = profile.ua;
+            const acceptLang = session?.userData?.acceptLanguage || pickOne(ACCEPT_LANGUAGE_POOL);
+            const referer = ensureRefererChain(request);
+            const fetchSite = computeFetchSite(request.url, referer);
+
             const headers = {
                 'user-agent': ua,
                 'accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
@@ -718,14 +888,15 @@ const crawler = new CheerioCrawler({
                 'cache-control': 'max-age=0',
                 'sec-fetch-dest': 'document',
                 'sec-fetch-mode': 'navigate',
-                'sec-fetch-site': Math.random() > 0.5 ? 'none' : 'same-origin',
+                'sec-fetch-site': fetchSite,
                 'sec-fetch-user': '?1',
-                'sec-ch-ua': ua.includes('Chrome') ? '"Chromium";v="122", "Not(A:Brand";v="24", "Google Chrome";v="122"' : undefined,
-                'sec-ch-ua-mobile': '?0',
-                'sec-ch-ua-platform': ua.includes('Windows') ? '"Windows"' : ua.includes('Mac') ? '"macOS"' : '"Linux"',
                 'referer': referer,
             };
-            
+
+            for (const [key, value] of Object.entries(profile.ch || {})) {
+                if (value !== undefined && value !== null) headers[key] = value;
+            }
+
             // Remove undefined headers
             Object.keys(headers).forEach(key => headers[key] === undefined && delete headers[key]);
 
@@ -733,11 +904,10 @@ const crawler = new CheerioCrawler({
             if (ctx.requestOptions) ctx.requestOptions.headers = { ...(ctx.requestOptions.headers || {}), ...headers };
             request.headers = { ...(request.headers || {}), ...headers };
 
-            // Reduced delay with jitter for better performance
-            if (downloadIntervalMs) {
-                const jitter = Math.floor(Math.random() * 40);
-                await sleep(Math.max(50, downloadIntervalMs - 50) + jitter);
-            }
+            const label = request.userData?.label || 'DEFAULT';
+            const retryCount = request.retryCount || 0;
+            const delayMs = computeDelayMs(label, downloadIntervalMs, retryCount);
+            await sleep(delayMs);
         },
     ],
 
@@ -804,7 +974,7 @@ const crawler = new CheerioCrawler({
                         QUEUED_DETAILS.add(norm);
                         await enqueueLinks({
                             urls: [norm],
-                            userData: { label: 'DETAIL', card, referer: baseUrl },
+                            userData: { label: 'DETAIL', card, referer: baseUrl, originListUrl: baseUrl },
                         });
                     }
                 }
@@ -957,7 +1127,7 @@ const crawler = new CheerioCrawler({
 log.info(`🚀 Starting crawler with target: ${results_wanted} jobs`);
 log.info(`📍 Start URL: ${START_URL}`);
 
-await crawler.run([{ url: START_URL, userData: { label: 'LIST', referer: 'https://www.google.com/' } }]);
+await crawler.run([{ url: START_URL, userData: { label: 'LIST', referer: buildSearchReferer() } }]);
 
 // =============== Final report ===============
 const finalCount = pushed;
