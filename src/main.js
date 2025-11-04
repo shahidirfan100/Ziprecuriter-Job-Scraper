@@ -814,6 +814,9 @@ const QUEUED_DETAILS = new Set();
 let pagesProcessed = 0;
 let listPagesQueued = 1;
 const MAX_PAGES = 50;
+const MAX_STALL_RECOVERY = 4;
+let stallRecoveryAttempts = 0;
+let lastListUrlNorm = null;
 
 // PATCH: derived ceiling to prevent "requests storm" when site loops
 const MAX_REQS = Number.isFinite(maxRequestsPerCrawl) && maxRequestsPerCrawl > 0
@@ -942,6 +945,7 @@ const crawler = new CheerioCrawler({
             // normalize and mark this list page as seen for loop prevention
             const baseUrlNorm = normalizeListUrl(baseUrl);
             PAGINATION_URLS_SEEN.add(baseUrlNorm);
+            lastListUrlNorm = baseUrlNorm;
 
             // parse cards
             const cards = scrapeCards($, baseUrl);
@@ -983,19 +987,28 @@ const crawler = new CheerioCrawler({
             log.info(`📄 LIST page ${pagesProcessed}: found ${cards.length} cards, new ${newAdded} → SEEN=${SEEN_URLS.size}, scraped=${pushed}/${results_wanted}`);
 
             // === PATCH: stall detector ===
-            if (newAdded === 0) noProgressPages += 1; else noProgressPages = 0;
+            if (newAdded === 0) {
+                noProgressPages += 1;
+            } else {
+                noProgressPages = 0;
+                stallRecoveryAttempts = 0;
+            }
             const stalled = noProgressPages >= STALL_LIMIT;
 
             // Enhanced pagination planning with higher lookahead
             const estimatedJobsPerPage = cards.length > 0 ? cards.length : 20;
-            const remainingNeeded = results_wanted - SEEN_URLS.size;
+            const desiredSeen = collect_details
+                ? Math.max(results_wanted + 20, Math.ceil(results_wanted * 1.3))
+                : results_wanted;
+            const remainingNeeded = desiredSeen - SEEN_URLS.size;
             const pagesNeeded = Math.ceil(Math.max(0, remainingNeeded) / Math.max(1, estimatedJobsPerPage));
-            const pagesToQueue = Math.min(5, Math.max(0, pagesNeeded)); // Increased from 3 to 5
+            const pagesToQueue = Math.min(6, Math.max(0, pagesNeeded)); // wider lookahead for pagination stability
 
-            const shouldContinue = SEEN_URLS.size < results_wanted * 1.5 &&
+            const stillNeedJobs = pushed < results_wanted;
+            const coverageShort = SEEN_URLS.size < desiredSeen;
+            const shouldContinue = (coverageShort || stillNeedJobs) &&
                                    pagesProcessed < MAX_PAGES &&
                                    listPagesQueued < MAX_PAGES * 2 &&
-                                   pushed < results_wanted &&
                                    !stalled;
 
             if (shouldContinue && pagesToQueue > 0) {
@@ -1026,7 +1039,9 @@ const crawler = new CheerioCrawler({
                             },
                         });
 
-                        if (i === 0) log.info(`➡️  Next page queued (#${listPagesQueued}): ${nextUrl.substring(0, 120)}...`);
+                        if (i === 0) {
+                            log.info(`Next page queued (#${listPagesQueued}): ${nextUrl.substring(0, 120)}...`);
+                        }
 
                         currentUrl = nextUrl;
                         successfulQueues++;
@@ -1037,20 +1052,19 @@ const crawler = new CheerioCrawler({
 
                 if (successfulQueues === 0) {
                     if (stalled) {
-                        log.warning(`🛑 Stalled pagination detected (no new jobs for ${noProgressPages} pages). Stopping pagination.`);
+                        log.warning(`Pagination stalled (no new jobs for ${noProgressPages} pages).`);
                     } else if (lastFoundNextUrl && PAGINATION_URLS_SEEN.has(lastFoundNextUrl)) {
-                        log.warning(`⚠ Pagination loop detected - URL already seen`);
+                        log.warning('Pagination loop detected - URL already seen');
                     } else {
-                        log.warning(`⚠ No next page found after page ${pagesProcessed}. SEEN=${SEEN_URLS.size}, target=${results_wanted}`);
+                        log.warning(`No next page found after page ${pagesProcessed}. SEEN=${SEEN_URLS.size}, target=${results_wanted}`);
                     }
 
-                    // Enhanced alternative pagination with multiple fallbacks
                     const alt = tryAlternativePagination(baseUrl, pagesProcessed);
                     const altNorm = alt ? normalizeListUrl(alt) : null;
                     if (altNorm && !PAGINATION_URLS_SEEN.has(altNorm) && !stalled && pushed < results_wanted) {
                         listPagesQueued++;
                         PAGINATION_URLS_SEEN.add(altNorm);
-                        log.info(`➡️  Alternative page ${listPagesQueued}: ${altNorm.substring(0, 120)}...`);
+                        log.info(`Alternative page ${listPagesQueued}: ${altNorm.substring(0, 120)}...`);
                         await enqueueLinks({
                             urls: [altNorm],
                             userData: { label: 'LIST', referer: baseUrl },
@@ -1060,17 +1074,50 @@ const crawler = new CheerioCrawler({
                     }
                 }
             } else {
-                if (pagesProcessed >= MAX_PAGES) {
-                    log.warning(`⛔ Reached MAX_PAGES limit (${MAX_PAGES})`);
-                } else if (pagesToQueue <= 0) {
-                    log.info(`✓ Enough jobs collected/queued`);
-                } else if (stalled) {
-                    log.info(`✓ Stopping pagination due to stall (no new jobs for ${noProgressPages} pages).`);
+                if (stalled && (coverageShort || stillNeedJobs)) {
+                    if (stallRecoveryAttempts < MAX_STALL_RECOVERY) {
+                        stallRecoveryAttempts++;
+                        const shortfall = Math.max(results_wanted - pushed, desiredSeen - SEEN_URLS.size);
+                        const forcePages = Math.min(4, Math.max(1, Math.ceil(shortfall / Math.max(1, estimatedJobsPerPage))));
+                        let forcedCurrent = lastListUrlNorm || baseUrlNorm;
+                        let forcedQueued = 0;
+                        for (let i = 0; i < forcePages; i++) {
+                            const forcedRaw = findNextPageByUrlOnly(forcedCurrent);
+                            if (!forcedRaw) break;
+                            const forcedNorm = normalizeListUrl(forcedRaw);
+                            forcedCurrent = forcedNorm;
+                            if (PAGINATION_URLS_SEEN.has(forcedNorm)) continue;
+
+                            listPagesQueued++;
+                            PAGINATION_URLS_SEEN.add(forcedNorm);
+                            await enqueueLinks({
+                                urls: [forcedNorm],
+                                userData: { label: 'LIST', referer: baseUrl },
+                                forefront: i === 0,
+                                transformRequestFunction: (req) => {
+                                    req.uniqueKey = `${normalizeListUrl(req.url)}#LIST`;
+                                    return req;
+                                },
+                            });
+                            forcedQueued++;
+                        }
+
+                        if (forcedQueued > 0) {
+                            log.info(`Stall recovery attempt ${stallRecoveryAttempts}/${MAX_STALL_RECOVERY}: queued ${forcedQueued} fallback page(s).`);
+                            noProgressPages = Math.max(0, Math.floor(STALL_LIMIT / 2));
+                            return;
+                        }
+                    }
+                    log.info(`Stopping pagination after ${noProgressPages} empty pages (stall).`);
                     noProgressPages = 0;
+                } else if (pagesProcessed >= MAX_PAGES) {
+                    log.warning(`Reached MAX_PAGES limit (${MAX_PAGES}).`);
+                } else if (pagesToQueue <= 0) {
+                    log.info('Enough jobs collected/queued for target buffer.');
                 } else if (pushed >= results_wanted) {
-                    log.info(`✓ Job cap reached (${pushed}/${results_wanted}). Not queuing more pages.`);
+                    log.info(`Job cap reached (${pushed}/${results_wanted}). Not queuing more pages.`);
                 } else {
-                    log.info(`✓ Target buffer reached: SEEN=${SEEN_URLS.size} (target ${results_wanted})`);
+                    log.info(`Target buffer reached: SEEN=${SEEN_URLS.size} (target ${results_wanted}).`);
                 }
             }
 
@@ -1158,3 +1205,4 @@ if (finalCount < results_wanted) {
 }
 
 await Actor.exit();
+
