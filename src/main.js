@@ -3,8 +3,10 @@
 // COMPLETE FILE with targeted patches to prevent: endless requests with few/no results,
 // circular pagination, and mid-run stalls. No new dependencies; output schema unchanged.
 
-import { Actor, log } from 'apify';
+import { Actor, log, KeyValueStore } from 'apify';
 import { CheerioCrawler, Dataset } from 'crawlee';
+import { gotScraping } from 'got-scraping';
+import HeaderGenerator from 'header-generator';
 
 // =============== Small utilities ===============
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -285,6 +287,17 @@ const UA_PROFILES = [
 ];
 const pickUAProfile = () => pickOne(UA_PROFILES);
 
+const headerGenerator = new HeaderGenerator({
+    browsers: [
+        { name: 'chrome', minVersion: 116, maxVersion: 130 },
+        { name: 'firefox', minVersion: 120, maxVersion: 131 },
+        { name: 'safari', minVersion: 16, maxVersion: 18 },
+    ],
+    devices: ['desktop'],
+    operatingSystems: ['windows', 'macos', 'linux'],
+    locales: ['en-US', 'en-GB', 'en-CA', 'en-AU'],
+});
+
 const ACCEPT_LANGUAGE_POOL = [
     'en-US,en;q=0.9',
     'en-US,en;q=0.9,en-GB;q=0.8',
@@ -321,6 +334,34 @@ const buildSearchReferer = () => {
     const query = pickOne(SEARCH_QUERIES);
     const engine = pickOne(SEARCH_ENGINES);
     return engine(query);
+};
+
+const buildSessionHeaders = (session, referer, fetchSite) => {
+    const store = session ? (session.userData = session.userData || {}) : {};
+    const now = Date.now();
+    const needsRefresh = !store.headerProfile || (now - (store.headerProfile.ts || 0)) > 2 * 60 * 1000;
+
+    if (needsRefresh) {
+        store.headerProfile = {
+            ts: now,
+            headers: headerGenerator.getHeaders({
+                httpVersion: '2',
+                locales: ACCEPT_LANGUAGE_POOL,
+                referer,
+            }),
+        };
+    }
+
+    const generated = { ...(store.headerProfile?.headers || {}) };
+    if (!generated['accept-language']) generated['accept-language'] = pickOne(ACCEPT_LANGUAGE_POOL);
+    generated['referer'] = referer;
+    generated['sec-fetch-site'] = fetchSite;
+    generated['sec-fetch-mode'] = 'navigate';
+    generated['sec-fetch-dest'] = 'document';
+    generated['upgrade-insecure-requests'] = '1';
+    generated['cache-control'] = 'max-age=0';
+    generated['accept'] = generated['accept'] || 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8';
+    return generated;
 };
 
 const ensureRefererChain = (request) => {
@@ -466,7 +507,7 @@ const findNextPage = ($, baseUrl) => {
         if (cur.searchParams.has(k)) {
             if (k === 'start') {
                 const start = parseInt(cur.searchParams.get('start'), 10) || 0;
-                const pageSize = 20;
+                const pageSize = TARGET_JOBS_PER_PAGE || 20;
                 cur.searchParams.set('start', String(start + pageSize));
                 return cur.href;
             }
@@ -478,6 +519,9 @@ const findNextPage = ($, baseUrl) => {
         }
     }
     if (/\/(jobs|search|candidate)/i.test(baseUrl)) {
+        if (!cur.searchParams.has('jobs_per_page') && TARGET_JOBS_PER_PAGE) {
+            cur.searchParams.set('jobs_per_page', String(TARGET_JOBS_PER_PAGE));
+        }
         cur.searchParams.set('page', '2');
         return cur.href;
     }
@@ -487,9 +531,12 @@ const findNextPage = ($, baseUrl) => {
 const findNextPageByUrlOnly = (baseUrl) => {
     try {
         const cur = new URL(baseUrl);
+        if (!cur.searchParams.has('jobs_per_page') && TARGET_JOBS_PER_PAGE) {
+            cur.searchParams.set('jobs_per_page', String(TARGET_JOBS_PER_PAGE));
+        }
         if (cur.searchParams.has('start')) {
             const start = parseInt(cur.searchParams.get('start'), 10) || 0;
-            const pageSize = 20;
+            const pageSize = TARGET_JOBS_PER_PAGE || 20;
             cur.searchParams.set('start', String(start + pageSize));
             return cur.href;
         }
@@ -505,10 +552,13 @@ const findNextPageByUrlOnly = (baseUrl) => {
 const tryAlternativePagination = (currentUrl, currentPageNum) => {
     try {
         const url = new URL(currentUrl);
+        if (!url.searchParams.has('jobs_per_page') && TARGET_JOBS_PER_PAGE) {
+            url.searchParams.set('jobs_per_page', String(TARGET_JOBS_PER_PAGE));
+        }
         const nextPageNum = currentPageNum + 1;
         if (!url.searchParams.has('page')) { url.searchParams.set('page', String(nextPageNum)); return url.href; }
         if (!url.searchParams.has('p'))    { url.searchParams.delete('page'); url.searchParams.set('p', String(nextPageNum)); return url.href; }
-        if (!url.searchParams.has('start')){ const pageSize = 20; url.searchParams.set('start', String((nextPageNum - 1) * pageSize)); return url.href; }
+        if (!url.searchParams.has('start')){ const pageSize = TARGET_JOBS_PER_PAGE || 20; url.searchParams.set('start', String((nextPageNum - 1) * pageSize)); return url.href; }
         if (!url.searchParams.has('page_number')) { url.searchParams.set('page_number', String(nextPageNum)); return url.href; }
         return null;
     } catch { return null; }
@@ -532,10 +582,165 @@ const normalizeListUrl = (url) => {
 const STALL_LIMIT = 3; // consecutive list pages with no new jobs
 let noProgressPages = 0;
 const PAGINATION_URLS_SEEN = new Set();
+let TARGET_JOBS_PER_PAGE = 20;
+const BLOCK_SAMPLE_KEY = 'ZIPRECRUITER_BLOCK_SAMPLE';
+let BLOCK_SAMPLE_STORED = false;
+
+const storeBlockSample = async (request, body, note = '') => {
+    if (BLOCK_SAMPLE_STORED) return;
+    BLOCK_SAMPLE_STORED = true;
+    try {
+        const kv = await KeyValueStore.open();
+        await kv.setValue(BLOCK_SAMPLE_KEY, {
+            url: request?.url ?? null,
+            note,
+            capturedAt: new Date().toISOString(),
+            body: body?.slice?.(0, 200_000) ?? null,
+        });
+    } catch (err) {
+        log.warning(`Failed to store block sample: ${err?.message || err}`);
+    }
+};
+
+const SAFE_JSON_ASSIGN_PREFIXES = [
+    'window.__INITIAL_STATE__',
+    'window.__NUXT__',
+    'window.__NEXT_DATA__',
+    'window.__JOB_DATA__',
+    'window.__APOLLO_STATE__',
+];
+
+const safeJsonParse = (raw) => {
+    try {
+        return JSON.parse(raw);
+    } catch {
+        return null;
+    }
+};
+
+const extractJsonFromScript = (text) => {
+    if (!text) return null;
+    let cleaned = text.trim();
+    if (!cleaned) return null;
+
+    for (const prefix of SAFE_JSON_ASSIGN_PREFIXES) {
+        if (cleaned.startsWith(prefix)) {
+            const idx = cleaned.indexOf('=');
+            if (idx > -1) cleaned = cleaned.slice(idx + 1).trim();
+        }
+    }
+
+    if (cleaned.endsWith(';')) cleaned = cleaned.slice(0, -1).trim();
+    if (!cleaned || cleaned.startsWith('JSON.parse')) return null;
+    return safeJsonParse(cleaned);
+};
+
+const looksLikeJob = (node) => {
+    if (!node || typeof node !== 'object') return false;
+    const hasTitle = ['title', 'jobTitle', 'name'].some((k) => STR(node[k]).length > 2);
+    const hasCompany = ['company', 'companyName', 'company_name', 'hiringOrganization'].some((k) => {
+        const val = node[k];
+        if (!val) return false;
+        if (typeof val === 'string') return val.trim().length > 1;
+        if (typeof val === 'object' && val.name) return true;
+        return false;
+    });
+    const hasUrl = ['url', 'jobUrl', 'applyUrl', 'link', 'detailUrl', 'absolute_url'].some((k) => STR(node[k]).startsWith('http'));
+    const hasId = ['job_id', 'jobId', 'jid', 'id'].some((k) => node[k]);
+    return (hasTitle && (hasCompany || hasUrl)) || (hasId && hasTitle);
+};
+
+const collectJobsFromPayload = (payload, acc) => {
+    if (Array.isArray(payload)) {
+        const jobish = payload.filter(looksLikeJob);
+        if (jobish.length) acc.push(...jobish);
+        for (const item of payload) collectJobsFromPayload(item, acc);
+        return;
+    }
+    if (payload && typeof payload === 'object') {
+        if (looksLikeJob(payload)) acc.push(payload);
+        for (const value of Object.values(payload)) collectJobsFromPayload(value, acc);
+    }
+};
+
+const extractStructuredJobs = ($) => {
+    const jobs = [];
+    $('script').each((_, el) => {
+        const text = $(el).contents().text();
+        if (!text || text.length < 50 || text.length > 500_000) return;
+        const json = extractJsonFromScript(text);
+        if (!json) return;
+        collectJobsFromPayload(json, jobs);
+    });
+    $('script[type="application/ld+json"]').each((_, el) => {
+        const text = $(el).contents().text();
+        const json = safeJsonParse(text);
+        if (!json) return;
+        collectJobsFromPayload(json, jobs);
+    });
+    return jobs;
+};
+
+const mapStructuredJob = (job) => {
+    const url = pickValue(
+        job.jobUrl, job.applyUrl, job.url, job.link, job.detailUrl,
+        job.absolute_url, job.jobDetailUrl, job.hiring_url,
+    );
+    const title = pickValue(job.title, job.jobTitle, job.name);
+    const company = pickValue(
+        job.companyName, job.company, job.company_name,
+        job.hiringOrganization?.name,
+        job.hiring_company?.name,
+    );
+    const location = pickValue(
+        job.location,
+        job.locationString,
+        job.locationCity && job.locationState ? `${job.locationCity}, ${job.locationState}` : null,
+        job.locationCity,
+        job.city && job.state ? `${job.city}, ${job.state}` : null,
+        job.city,
+        job.jobLocation?.address?.addressLocality,
+    );
+    const posted_text = pickValue(job.posted_time_friendly, job.postedTime, job.postedText);
+    const employment_type = pickValue(job.employment_type, job.employmentType);
+    const salary_raw = pickValue(job.compensation, job.salary, job.salaryText);
+    const salary_min = toNumber(job.salary_min ?? job.salaryMin ?? job.minSalary ?? job.compensation_min);
+    const salary_max = toNumber(job.salary_max ?? job.salaryMax ?? job.maxSalary ?? job.compensation_max);
+    const salary_period = pickValue(job.salaryPeriod, job.salary_period, job.compensation_period, job.pay_schedule);
+    const description_text = CLEAN(pickValue(job.descriptionSnippet, job.snippet, job.shortDescription, job.description)) || null;
+
+    return {
+        url: url || null,
+        title: title || null,
+        company: company ? sanitizeCompanyName(company) : null,
+        location: location || null,
+        employment_type: employment_type || null,
+        posted_text: posted_text || null,
+        posted_relative: posted_text ? guessPosted(posted_text)?.relative ?? null : null,
+        salary_raw: salary_raw || null,
+        salary_min: salary_min ?? null,
+        salary_max: salary_max ?? null,
+        salary_period: salary_period || null,
+        description_text,
+    };
+};
+
+const cardHasRichData = (card = {}) => {
+    const desc = STR(card.description_text);
+    const descHtml = STR(card.description_html);
+    const hasDescription = desc.length > 120 || descHtml.length > 400;
+    const hasSalary = card.salary_raw || (card.salary_min !== undefined && card.salary_min !== null);
+    return hasDescription || hasSalary;
+};
 
 // =============== Card & Detail scraping ===============
 const scrapeCards = ($, baseUrl) => {
     const jobs = [];
+    const structured = extractStructuredJobs($)
+        .map(mapStructuredJob)
+        .filter((job) => job.url);
+    if (structured.length) jobs.push(...structured);
+
     const LINK_SEL = [
         'a.job_link', 'a.job-link', 'a.t_job_link',
         'a[data-job-id]',
@@ -546,8 +751,7 @@ const scrapeCards = ($, baseUrl) => {
         '.job-card a', '.job_card a', '[class*="jobCard"] a',
     ].join(',');
 
-    const $links = $(LINK_SEL);
-    $links.each((_, el) => {
+    $(LINK_SEL).each((_, el) => {
         const $a = $(el);
         const href0 = $a.attr('href');
         if (!href0) return;
@@ -744,19 +948,21 @@ const scrapeDetail = ($, loadedUrl) => {
 };
 
 // =============== URL builders ===============
-const buildJobsUrl = (kw, loc, postedWithinDays) => {
-    const slug = (kw || 'Jobs').trim().replace(/\s+/g, '-').replace(/[^A-Za-z0-9-]/g, '');
-    let path = `/${encodeURIComponent(slug)}`;
-    if (loc && loc.trim()) path += `/-in-${encodeURIComponent(loc.trim())}`;
-    const url = new URL(`https://www.ziprecruiter.com/Jobs${path}`);
+const buildJobsUrl = (kw, loc, postedWithinDays, page = 1, jobsPerPage = 20) => {
+    const url = new URL('https://www.ziprecruiter.com/jobs-search');
+    url.searchParams.set('page', String(Math.max(1, page)));
+    url.searchParams.set('jobs_per_page', String(Math.max(10, Math.min(100, jobsPerPage))));
+    if (kw && kw.trim()) url.searchParams.set('search', kw.trim());
+    if (loc && loc.trim()) url.searchParams.set('location', loc.trim());
     if (postedWithinDays) url.searchParams.set('days', String(postedWithinDays));
     return url.href;
 };
-const buildCandidateSearchUrl = (kw, loc, postedWithinDays) => {
+const buildCandidateSearchUrl = (kw, loc, postedWithinDays, page = 1) => {
     const u = new URL('https://www.ziprecruiter.com/candidate/search');
     if (kw && kw.trim()) u.searchParams.set('search', kw.trim());
     if (loc && loc.trim()) u.searchParams.set('location', loc.trim());
     if (postedWithinDays) u.searchParams.set('days', String(postedWithinDays));
+    u.searchParams.set('page', String(Math.max(1, page)));
     return u.href;
 };
 
@@ -777,6 +983,8 @@ let {
     requestHandlerTimeoutSecs = 35,
     downloadIntervalMs: downloadIntervalMsInput = null,
     preferCandidateSearch = false,
+    jobsPerPage = 20,
+    jobs_per_page,
     // optional caps / aliases (no schema change)
     maxJobs,
     max_jobs,
@@ -789,13 +997,21 @@ const aliasCap = toNumber(maxJobs ?? max_jobs);
 if (aliasCap && aliasCap > 0) results_wanted = aliasCap;
 
 const postedWithinDays = resolvePostedWithin(postedWithin);
+const resolvedJobsPerPage = (() => {
+    const alias = toNumber(jobsPerPage ?? jobs_per_page);
+    const fallback = Number.isFinite(alias) ? alias : 20;
+    return Math.max(10, Math.min(100, fallback));
+})();
 
 if (startUrl) startUrl = ensureCorrectDomain(startUrl);
 const proxyConfig = await Actor.createProxyConfiguration(proxyConfiguration);
 const downloadIntervalMs = downloadIntervalMsInput ?? (collect_details ? 200 : 100);
+TARGET_JOBS_PER_PAGE = resolvedJobsPerPage;
 
 let START_URL = startUrl?.trim()
-    || (preferCandidateSearch ? buildCandidateSearchUrl(keyword, location, postedWithinDays) : buildJobsUrl(keyword, location, postedWithinDays));
+    || (preferCandidateSearch
+        ? buildCandidateSearchUrl(keyword, location, postedWithinDays, 1)
+        : buildJobsUrl(keyword, location, postedWithinDays, 1, resolvedJobsPerPage));
 
 const postedLabel = postedWithinDays ? `<=${postedWithinDays}d` : 'any';
 log.info(`ZipRecruiter: ${START_URL} | details: ${collect_details ? 'ON' : 'OFF'} | target: ${results_wanted} | posted: ${postedLabel}`);
@@ -836,6 +1052,22 @@ const crawler = new CheerioCrawler({
     navigationTimeoutSecs: requestHandlerTimeoutSecs + 10,
     useSessionPool: true,
     persistCookiesPerSession: true,
+    requestFunction: async ({ request, proxyInfo }) => {
+        const proxyUrl = proxyInfo?.url;
+        const response = await gotScraping({
+            url: request.url,
+            method: request.method,
+            headers: request.headers,
+            proxyUrl,
+            timeout: {
+                request: requestHandlerTimeoutSecs * 1000,
+            },
+            http2: true,
+            throwHttpErrors: false,
+            decompress: true,
+        });
+        return response;
+    },
     sessionPoolOptions: {
         maxPoolSize: Math.max(48, effectiveMaxConcurrency * 14),
         sessionOptions: {
@@ -865,46 +1097,35 @@ const crawler = new CheerioCrawler({
             if (session) {
                 const usageCount = session.usageCount ?? 0;
                 session.userData = session.userData || {};
-                if (!session.userData.uaProfile || usageCount > 8) {
+                if (!session.userData.uaProfile || usageCount > 10) {
                     session.userData.uaProfile = pickUAProfile();
                 }
                 if (!session.userData.acceptLanguage) {
                     session.userData.acceptLanguage = pickOne(ACCEPT_LANGUAGE_POOL);
                 }
-                if (usageCount > 10 && Math.random() < 0.35) {
+                if (usageCount > 12 && Math.random() < 0.35) {
                     session.retire();
                 }
             }
 
-            const profile = session?.userData?.uaProfile || pickUAProfile();
-            const ua = profile.ua;
-            const acceptLang = session?.userData?.acceptLanguage || pickOne(ACCEPT_LANGUAGE_POOL);
             const referer = ensureRefererChain(request);
             const fetchSite = computeFetchSite(request.url, referer);
-
-            const headers = {
-                'user-agent': ua,
-                'accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
-                'accept-language': acceptLang,
-                'accept-encoding': 'gzip, deflate, br',
-                'upgrade-insecure-requests': '1',
-                'cache-control': 'max-age=0',
-                'sec-fetch-dest': 'document',
-                'sec-fetch-mode': 'navigate',
-                'sec-fetch-site': fetchSite,
-                'sec-fetch-user': '?1',
-                'referer': referer,
-            };
+            const headers = buildSessionHeaders(session, referer, fetchSite);
+            const profile = session?.userData?.uaProfile || pickUAProfile();
+            const ua = headers['user-agent'] || profile.ua;
+            headers['user-agent'] = ua;
+            headers['accept-language'] = headers['accept-language'] || session?.userData?.acceptLanguage || pickOne(ACCEPT_LANGUAGE_POOL);
+            headers['sec-fetch-user'] = '?1';
+            headers['accept-encoding'] = headers['accept-encoding'] || 'gzip, deflate, br';
 
             for (const [key, value] of Object.entries(profile.ch || {})) {
                 if (value !== undefined && value !== null) headers[key] = value;
             }
 
-            // Remove undefined headers
-            Object.keys(headers).forEach(key => headers[key] === undefined && delete headers[key]);
+            Object.keys(headers).forEach((key) => {
+                if (headers[key] === undefined || headers[key] === null) delete headers[key];
+            });
 
-            if (ctx.gotOptions) ctx.gotOptions.headers = { ...(ctx.gotOptions.headers || {}), ...headers };
-            if (ctx.requestOptions) ctx.requestOptions.headers = { ...(ctx.requestOptions.headers || {}), ...headers };
             request.headers = { ...(request.headers || {}), ...headers };
 
             const label = request.userData?.label || 'DEFAULT';
@@ -915,26 +1136,28 @@ const crawler = new CheerioCrawler({
     ],
 
     requestHandler: async (ctx) => {
-        const { request, $, enqueueLinks, session, response } = ctx;
+        const { request, $, enqueueLinks, session, response, body } = ctx;
         const { label } = request.userData;
 
         // Enhanced block detection with session rotation
         if (response?.statusCode === 403 || response?.statusCode === 429) {
-            log.warning(`${response.statusCode} on ${request.url} — rotating session ${session?.id}`);
+            log.warning(`${response.statusCode} on ${request.url} - rotating session ${session?.id}`);
             if (session) {
                 session.retire();
                 session.markBad();
             }
+            await storeBlockSample(request, body, `HTTP ${response?.statusCode}`);
             throw new Error(`Blocked (${response.statusCode})`);
         }
         
         const bodyText = ($('title').text() + ' ' + $('.error, .captcha, #challenge-running, .cf-error-details').text()).toLowerCase();
         if (bodyText.includes('blocked') || bodyText.includes('access denied') || bodyText.includes('verify you are a human') || bodyText.includes('cloudflare')) {
-            log.warning(`Bot detection on ${request.url} — rotating session ${session?.id}`);
+            log.warning(`Bot detection on ${request.url} - rotating session ${session?.id}`);
             if (session) {
                 session.retire();
                 session.markBad();
             }
+            await storeBlockSample(request, body, 'Bot detection snippet');
             throw new Error('Blocked (bot detection)');
         }
 
@@ -963,7 +1186,9 @@ const crawler = new CheerioCrawler({
                 SEEN_URLS.add(norm);
                 newAdded++;
 
-                if (!collect_details) {
+                const needsDetailVisit = collect_details && !cardHasRichData(card);
+
+                if (!needsDetailVisit) {
                     const record = buildOutputRecord({
                         searchUrl: START_URL,
                         scrapedAt: new Date().toISOString(),
@@ -973,14 +1198,12 @@ const crawler = new CheerioCrawler({
                     });
                     await Dataset.pushData(record);
                     pushed++;
-                } else {
-                    if (!QUEUED_DETAILS.has(norm)) {
-                        QUEUED_DETAILS.add(norm);
-                        await enqueueLinks({
-                            urls: [norm],
-                            userData: { label: 'DETAIL', card, referer: baseUrl, originListUrl: baseUrl },
-                        });
-                    }
+                } else if (!QUEUED_DETAILS.has(norm)) {
+                    QUEUED_DETAILS.add(norm);
+                    await enqueueLinks({
+                        urls: [norm],
+                        userData: { label: 'DETAIL', card, referer: baseUrl, originListUrl: baseUrl },
+                    });
                 }
             }
 
@@ -1154,6 +1377,7 @@ const crawler = new CheerioCrawler({
         if (is403or429 && session) {
             log.warning(`Blocking error ${statusCode} for ${request.url} - session ${session.id} retired`);
             session.retire();
+            await storeBlockSample(request, error?.response?.body, `Failed request ${statusCode}`);
         } else {
             log.warning(`FAILED ${request.url}: ${error?.message || error}`);
             if (session) session.markBad();
