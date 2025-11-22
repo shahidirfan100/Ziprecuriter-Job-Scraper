@@ -1161,6 +1161,13 @@ const crawler = new CheerioCrawler({
             // soft warn only; do NOT abort crawl
             if (cards.length === 0) {
                 log.warning(`⚠ No job cards parsed on page ${pagesProcessed}. URL: ${baseUrl}`);
+                log.info(`DEBUG: Title: ${$('title').text()}`);
+                log.info(`DEBUG: HTML length: ${$.html().length}`);
+                const scripts = $('script').length;
+                const jsonLd = $('script[type="application/ld+json"]').length;
+                log.info(`DEBUG: Scripts: ${scripts}, JSON-LD: ${jsonLd}`);
+                const bodyText = $('body').text().slice(0, 200);
+                log.info(`DEBUG: Body start: ${bodyText.replace(/\s+/g, ' ')}`);
             }
 
             let newAdded = 0;
