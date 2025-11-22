@@ -5,6 +5,7 @@
 
 import { Actor, log, KeyValueStore } from 'apify';
 import { CheerioCrawler, Dataset } from 'crawlee';
+import { gotScraping } from 'got-scraping';
 import { HeaderGenerator } from 'header-generator';
 
 // =============== Small utilities ===============
@@ -451,9 +452,9 @@ const extractJsonLd = ($) => {
                 const arr = Array.isArray(data) ? data : [data];
                 const jp = arr.find((x) => x['@type'] === 'JobPosting');
                 if (jp) return jp;
-            } catch {}
+            } catch { }
         }
-    } catch {}
+    } catch { }
     return null;
 };
 
@@ -556,8 +557,8 @@ const tryAlternativePagination = (currentUrl, currentPageNum) => {
         }
         const nextPageNum = currentPageNum + 1;
         if (!url.searchParams.has('page')) { url.searchParams.set('page', String(nextPageNum)); return url.href; }
-        if (!url.searchParams.has('p'))    { url.searchParams.delete('page'); url.searchParams.set('p', String(nextPageNum)); return url.href; }
-        if (!url.searchParams.has('start')){ const pageSize = TARGET_JOBS_PER_PAGE || 20; url.searchParams.set('start', String((nextPageNum - 1) * pageSize)); return url.href; }
+        if (!url.searchParams.has('p')) { url.searchParams.delete('page'); url.searchParams.set('p', String(nextPageNum)); return url.href; }
+        if (!url.searchParams.has('start')) { const pageSize = TARGET_JOBS_PER_PAGE || 20; url.searchParams.set('start', String((nextPageNum - 1) * pageSize)); return url.href; }
         if (!url.searchParams.has('page_number')) { url.searchParams.set('page_number', String(nextPageNum)); return url.href; }
         return null;
     } catch { return null; }
@@ -568,7 +569,7 @@ const normalizeListUrl = (url) => {
     try {
         const u = new URL(url);
         u.hash = '';
-        const drop = new Set(['utm_source','utm_medium','utm_campaign','utm_term','utm_content','ref','fbclid','gclid']);
+        const drop = new Set(['utm_source', 'utm_medium', 'utm_campaign', 'utm_term', 'utm_content', 'ref', 'fbclid', 'gclid']);
         const keepSorted = Array.from(u.searchParams.entries())
             .filter(([k]) => !drop.has(k))
             .sort(([a], [b]) => a.localeCompare(b));
@@ -968,129 +969,117 @@ const buildCandidateSearchUrl = (kw, loc, postedWithinDays, page = 1) => {
 // =============== Actor main ===============
 await Actor.init();
 
-try {
-    const input = (await Actor.getInput()) || {};
-    
-    // Validate that we have input
-    if (!input || Object.keys(input).length === 0) {
-        log.warning('No input provided, using default values');
-    }
-    
-    let {
-        startUrl,
-        keyword = 'developer',
-        location = '',
-        postedWithin = 'any',
-        results_wanted = 100,
-        collect_details = true,
-        maxConcurrency = 10,
-        maxRequestRetries = 2,
-        proxyConfiguration = { useApifyProxy: true, apifyProxyGroups: ['RESIDENTIAL'], countryCode: 'US' },
-        requestHandlerTimeoutSecs = 35,
-        downloadIntervalMs: downloadIntervalMsInput = null,
-        preferCandidateSearch = false,
-        jobsPerPage = 20,
-        jobs_per_page,
-        // optional caps / aliases (no schema change)
-        maxJobs,
-        max_jobs,
-        // optional: allow user to set cap; otherwise we derive a safe ceiling
-        maxRequestsPerCrawl = null,
-    } = input;
+const input = (await Actor.getInput()) || {};
+let {
+    startUrl,
+    keyword = 'Administrative Assistant',
+    location = '',
+    postedWithin = 'any',
+    results_wanted = 100,
+    collect_details = true,
+    maxConcurrency = 10,
+    maxRequestRetries = 2,
+    proxyConfiguration = { useApifyProxy: true, apifyProxyGroups: ['RESIDENTIAL'], countryCode: 'US' },
+    requestHandlerTimeoutSecs = 35,
+    downloadIntervalMs: downloadIntervalMsInput = null,
+    preferCandidateSearch = false,
+    jobsPerPage = 20,
+    jobs_per_page,
+    // optional caps / aliases (no schema change)
+    maxJobs,
+    max_jobs,
+    // optional: allow user to set cap; otherwise we derive a safe ceiling
+    maxRequestsPerCrawl = null,
+} = input;
 
-    // ===== Input Validation =====
-    // Validate results_wanted
-    if (results_wanted < 1 || results_wanted > 10000) {
-        throw new Error(`results_wanted must be between 1 and 10000 (got: ${results_wanted})`);
-    }
-    
-    // Validate maxConcurrency
-    if (maxConcurrency < 1 || maxConcurrency > 50) {
-        log.warning(`maxConcurrency should be between 1 and 50 (got: ${maxConcurrency}). Adjusting...`);
-        maxConcurrency = Math.max(1, Math.min(50, maxConcurrency));
-    }
-    
-    // If no startUrl provided, we need at least a keyword to build search URL
-    if (!startUrl && !keyword) {
-        throw new Error('Either "startUrl" or "keyword" must be provided');
-    }
+// normalize cap aliases
+const aliasCap = toNumber(maxJobs ?? max_jobs);
+if (aliasCap && aliasCap > 0) results_wanted = aliasCap;
 
-    // normalize cap aliases
-    const aliasCap = toNumber(maxJobs ?? max_jobs);
-    if (aliasCap && aliasCap > 0) results_wanted = aliasCap;
+const postedWithinDays = resolvePostedWithin(postedWithin);
+const resolvedJobsPerPage = (() => {
+    const alias = toNumber(jobsPerPage ?? jobs_per_page);
+    const fallback = Number.isFinite(alias) ? alias : 20;
+    return Math.max(10, Math.min(100, fallback));
+})();
 
-    const postedWithinDays = resolvePostedWithin(postedWithin);
-    const resolvedJobsPerPage = (() => {
-        const alias = toNumber(jobsPerPage ?? jobs_per_page);
-        const fallback = Number.isFinite(alias) ? alias : 20;
-        return Math.max(10, Math.min(100, fallback));
-    })();
+if (startUrl) startUrl = ensureCorrectDomain(startUrl);
+const proxyConfig = await Actor.createProxyConfiguration(proxyConfiguration);
+const downloadIntervalMs = downloadIntervalMsInput ?? (collect_details ? 200 : 100);
+TARGET_JOBS_PER_PAGE = resolvedJobsPerPage;
 
-    if (startUrl) startUrl = ensureCorrectDomain(startUrl);
-    const proxyConfig = await Actor.createProxyConfiguration(proxyConfiguration);
-    const downloadIntervalMs = downloadIntervalMsInput ?? (collect_details ? 200 : 100);
-    TARGET_JOBS_PER_PAGE = resolvedJobsPerPage;
+let START_URL = startUrl?.trim()
+    || (preferCandidateSearch
+        ? buildCandidateSearchUrl(keyword, location, postedWithinDays, 1)
+        : buildJobsUrl(keyword, location, postedWithinDays, 1, resolvedJobsPerPage));
 
-    let START_URL = startUrl?.trim()
-        || (preferCandidateSearch
-            ? buildCandidateSearchUrl(keyword, location, postedWithinDays, 1)
-            : buildJobsUrl(keyword, location, postedWithinDays, 1, resolvedJobsPerPage));
+const postedLabel = postedWithinDays ? `<=${postedWithinDays}d` : 'any';
+log.info(`ZipRecruiter: ${START_URL} | details: ${collect_details ? 'ON' : 'OFF'} | target: ${results_wanted} | posted: ${postedLabel}`);
 
-    const postedLabel = postedWithinDays ? `<=${postedWithinDays}d` : 'any';
-    log.info(`ZipRecruiter: ${START_URL} | details: ${collect_details ? 'ON' : 'OFF'} | target: ${results_wanted} | posted: ${postedLabel}`);
+const STEALTH_CONCURRENCY_CAP = collect_details ? 6 : 8;
+const effectiveMaxConcurrency = Math.max(2, Math.min(maxConcurrency, STEALTH_CONCURRENCY_CAP));
+if (effectiveMaxConcurrency !== maxConcurrency) {
+    log.info(`Stealth tuning: capping maxConcurrency ${maxConcurrency} -> ${effectiveMaxConcurrency}`);
+}
+maxConcurrency = effectiveMaxConcurrency;
 
-    const STEALTH_CONCURRENCY_CAP = collect_details ? 6 : 8;
-    const effectiveMaxConcurrency = Math.max(2, Math.min(maxConcurrency, STEALTH_CONCURRENCY_CAP));
-    if (effectiveMaxConcurrency !== maxConcurrency) {
-        log.info(`Stealth tuning: capping maxConcurrency ${maxConcurrency} -> ${effectiveMaxConcurrency}`);
-    }
-    maxConcurrency = effectiveMaxConcurrency;
+// ===== run state =====
+let pushed = 0;
+const SEEN_URLS = new Set();
+const QUEUED_DETAILS = new Set();
+let pagesProcessed = 0;
+let listPagesQueued = 1;
+const MAX_PAGES = 50;
+const MAX_STALL_RECOVERY = 4;
+let stallRecoveryAttempts = 0;
+let lastListUrlNorm = null;
 
-    // ===== run state =====
-    let pushed = 0;
-    const SEEN_URLS = new Set();
-    const QUEUED_DETAILS = new Set();
-    let pagesProcessed = 0;
-    let listPagesQueued = 1;
-    const MAX_PAGES = 50;
-    const MAX_STALL_RECOVERY = 4;
-    let stallRecoveryAttempts = 0;
-    let lastListUrlNorm = null;
-    // consecutive blocked list pages counter to stop pagination when server starts blocking
-    let blockedListPages = 0;
-    // track if we've already tried the alternate candidate-search URL as a fallback
-    let triedCandidateFallback = false;
+// PATCH: derived ceiling to prevent "requests storm" when site loops
+const MAX_REQS = Number.isFinite(maxRequestsPerCrawl) && maxRequestsPerCrawl > 0
+    ? maxRequestsPerCrawl
+    : Math.max(200, results_wanted * 3);
 
-    // PATCH: derived ceiling to prevent "requests storm" when site loops
-    const MAX_REQS = Number.isFinite(maxRequestsPerCrawl) && maxRequestsPerCrawl > 0
-        ? maxRequestsPerCrawl
-        : Math.max(200, results_wanted * 3);
+// reset loop trackers
+noProgressPages = 0;
+PAGINATION_URLS_SEEN.clear();
 
-    // reset loop trackers
-    noProgressPages = 0;
-    PAGINATION_URLS_SEEN.clear();
-
-    const crawler = new CheerioCrawler({
-        proxyConfiguration: proxyConfig,
-        maxConcurrency,
-        maxRequestRetries: Math.max(3, maxRequestRetries + 2), // Add headroom for stealth backoff
-        maxRequestsPerCrawl: MAX_REQS,
-        requestHandlerTimeoutSecs,
-        navigationTimeoutSecs: requestHandlerTimeoutSecs + 10,
-        useSessionPool: true,
-        persistCookiesPerSession: true,
-        sessionPoolOptions: {
-            maxPoolSize: Math.max(48, effectiveMaxConcurrency * 14),
-            sessionOptions: {
-                maxUsageCount: 12,
-                maxAgeSecs: 420,
-                errorScoreDecrement: 0.5,
-                maxErrorScore: 2.2,
+const crawler = new CheerioCrawler({
+    proxyConfiguration: proxyConfig,
+    maxConcurrency,
+    maxRequestRetries: Math.max(3, maxRequestRetries + 2), // Add headroom for stealth backoff
+    maxRequestsPerCrawl: MAX_REQS,
+    requestHandlerTimeoutSecs,
+    navigationTimeoutSecs: requestHandlerTimeoutSecs + 10,
+    useSessionPool: true,
+    persistCookiesPerSession: true,
+    requestFunction: async ({ request, proxyInfo }) => {
+        const proxyUrl = proxyInfo?.url;
+        const response = await gotScraping({
+            url: request.url,
+            method: request.method,
+            headers: request.headers,
+            proxyUrl,
+            timeout: {
+                request: requestHandlerTimeoutSecs * 1000,
             },
+            http2: true,
+            throwHttpErrors: false,
+            decompress: true,
+        });
+        return response;
+    },
+    sessionPoolOptions: {
+        maxPoolSize: Math.max(48, effectiveMaxConcurrency * 14),
+        sessionOptions: {
+            maxUsageCount: 12,
+            maxAgeSecs: 420,
+            errorScoreDecrement: 0.5,
+            maxErrorScore: 2.2,
         },
-        autoscaledPoolOptions: { maybeRunIntervalSecs: 0.3, minConcurrency: 2 },
+    },
+    autoscaledPoolOptions: { maybeRunIntervalSecs: 0.3, minConcurrency: 2 },
 
-        preNavigationHooks: [
+    preNavigationHooks: [
         async (ctx) => {
             const { request, session, proxyInfo } = ctx;
 
@@ -1144,339 +1133,278 @@ try {
             const delayMs = computeDelayMs(label, downloadIntervalMs, retryCount);
             await sleep(delayMs);
         },
-        ],
+    ],
 
-        requestHandler: async (ctx) => {
-            const { request, $, enqueueLinks, session, response, body } = ctx;
-            const { label } = request.userData;
+    requestHandler: async (ctx) => {
+        const { request, $, enqueueLinks, session, response, body } = ctx;
+        const { label } = request.userData;
 
-            // Enhanced block detection with session rotation
-            if (response?.statusCode === 403 || response?.statusCode === 429) {
-                log.warning(`${response.statusCode} on ${request.url} - rotating session ${session?.id}`);
-                if (session) {
-                    session.retire();
-                    session.markBad();
-                }
-                await storeBlockSample(request, body, `HTTP ${response?.statusCode}`);
+        // Enhanced block detection with session rotation
+        if (response?.statusCode === 403 || response?.statusCode === 429) {
+            log.warning(`${response.statusCode} on ${request.url} - rotating session ${session?.id}`);
+            if (session) {
+                session.retire();
+                session.markBad();
+            }
+            await storeBlockSample(request, body, `HTTP ${response?.statusCode}`);
+            throw new Error(`Blocked (${response.statusCode})`);
+        }
 
-                try {
-                    await Dataset.pushData({
-                        type: 'blocked',
-                        url: request.url,
-                        statusCode: response?.statusCode || null,
-                        label: request.userData?.label || null,
-                        at: new Date().toISOString(),
+        const bodyText = ($('title').text() + ' ' + $('.error, .captcha, #challenge-running, .cf-error-details').text()).toLowerCase();
+        if (bodyText.includes('blocked') || bodyText.includes('access denied') || bodyText.includes('verify you are a human') || bodyText.includes('cloudflare')) {
+            log.warning(`Bot detection on ${request.url} - rotating session ${session?.id}`);
+            if (session) {
+                session.retire();
+                session.markBad();
+            }
+            await storeBlockSample(request, body, 'Bot detection snippet');
+            throw new Error('Blocked (bot detection)');
+        }
+
+        if (!label || label === 'LIST') {
+            const baseUrl = request.loadedUrl ?? request.url;
+            pagesProcessed++;
+
+            // normalize and mark this list page as seen for loop prevention
+            const baseUrlNorm = normalizeListUrl(baseUrl);
+            PAGINATION_URLS_SEEN.add(baseUrlNorm);
+            lastListUrlNorm = baseUrlNorm;
+
+            // parse cards
+            const cards = scrapeCards($, baseUrl);
+
+            // soft warn only; do NOT abort crawl
+            if (cards.length === 0) {
+                log.warning(`⚠ No job cards parsed on page ${pagesProcessed}. URL: ${baseUrl}`);
+            }
+
+            let newAdded = 0;
+
+            for (const card of cards) {
+                const norm = normalizeJobUrl(card.url);
+                if (SEEN_URLS.has(norm)) continue;
+                SEEN_URLS.add(norm);
+                newAdded++;
+
+                const needsDetailVisit = collect_details && !cardHasRichData(card);
+
+                if (!needsDetailVisit) {
+                    const record = buildOutputRecord({
+                        searchUrl: START_URL,
+                        scrapedAt: new Date().toISOString(),
+                        url: norm,
+                        referer: baseUrl,
+                        card,
                     });
-                } catch (e) {
-                    log.debug('Failed to record blocked event', e?.message || e);
+                    await Dataset.pushData(record);
+                    pushed++;
+                } else if (!QUEUED_DETAILS.has(norm)) {
+                    QUEUED_DETAILS.add(norm);
+                    await enqueueLinks({
+                        urls: [norm],
+                        userData: { label: 'DETAIL', card, referer: baseUrl, originListUrl: baseUrl },
+                    });
                 }
-
-                // For list pages, track consecutive blocked pages and stop pagination if it keeps happening
-                if (request.userData?.label === 'LIST') {
-                    blockedListPages++;
-                    log.warning(`Consecutive blocked LIST pages: ${blockedListPages}`);
-                    if (blockedListPages >= 3) {
-                        log.warning('Too many consecutive blocked list pages — stopping pagination to avoid further blocks');
-                        noProgressPages = STALL_LIMIT; // force pagination stop
-                    }
-                }
-
-                // Treat blocked response as handled (don't throw) — skip processing of this page
-                return;
-            }
-            
-            const bodyText = ($('title').text() + ' ' + $('.error, .captcha, #challenge-running, .cf-error-details').text()).toLowerCase();
-            if (bodyText.includes('blocked') || bodyText.includes('access denied') || bodyText.includes('verify you are a human') || bodyText.includes('cloudflare')) {
-                log.warning(`Bot detection on ${request.url} - rotating session ${session?.id}`);
-                if (session) {
-                    session.retire();
-                    session.markBad();
-                }
-                await storeBlockSample(request, body, 'Bot detection snippet');
-                throw new Error('Blocked (bot detection)');
             }
 
-            if (!label || label === 'LIST') {
-                const baseUrl = request.loadedUrl ?? request.url;
-                pagesProcessed++;
+            log.info(`📄 LIST page ${pagesProcessed}: found ${cards.length} cards, new ${newAdded} → SEEN=${SEEN_URLS.size}, scraped=${pushed}/${results_wanted}`);
 
-                // normalize and mark this list page as seen for loop prevention
-                const baseUrlNorm = normalizeListUrl(baseUrl);
-                PAGINATION_URLS_SEEN.add(baseUrlNorm);
-                lastListUrlNorm = baseUrlNorm;
+            // === PATCH: stall detector ===
+            if (newAdded === 0) {
+                noProgressPages += 1;
+            } else {
+                noProgressPages = 0;
+                stallRecoveryAttempts = 0;
+            }
+            const stalled = noProgressPages >= STALL_LIMIT;
 
-                // parse cards
-                const cards = scrapeCards($, baseUrl);
+            // Enhanced pagination planning with higher lookahead
+            const estimatedJobsPerPage = cards.length > 0 ? cards.length : 20;
+            const desiredSeen = collect_details
+                ? Math.max(results_wanted + 20, Math.ceil(results_wanted * 1.3))
+                : results_wanted;
+            const remainingNeeded = desiredSeen - SEEN_URLS.size;
+            const pagesNeeded = Math.ceil(Math.max(0, remainingNeeded) / Math.max(1, estimatedJobsPerPage));
+            const pagesToQueue = Math.min(6, Math.max(0, pagesNeeded)); // wider lookahead for pagination stability
 
-                // soft warn only; do NOT abort crawl
-                if (cards.length === 0) {
-                    log.warning(`⚠ No job cards parsed on page ${pagesProcessed}. URL: ${baseUrl}`);
+            const stillNeedJobs = pushed < results_wanted;
+            const coverageShort = SEEN_URLS.size < desiredSeen;
+            const shouldContinue = (coverageShort || stillNeedJobs) &&
+                pagesProcessed < MAX_PAGES &&
+                listPagesQueued < MAX_PAGES * 2 &&
+                !stalled;
 
-                    // Diagnostic: log quick facts that help QA identify why parsing failed
-                    try {
-                        const structuredJobs = extractStructuredJobs($);
-                        const anchorCount = $('a[href*="/job"], a[href*="/jobs/"], a[data-job-id]').length;
-                        const snippet = ($('main, #results, #search-results').first().text() || $('body').text() || '').slice(0, 600);
-                        log.info(`Diagnostics: status=${response?.statusCode ?? 'n/a'}, anchors=${anchorCount}, structuredJobs=${structuredJobs.length}, snippet=[${snippet.replace(/\s+/g,' ').slice(0,200)}]`);
-                    } catch (dE) {
-                        log.debug('Diagnostics failed', dE?.message || dE);
-                    }
+            if (shouldContinue && pagesToQueue > 0) {
+                let currentUrl = baseUrl;
+                let successfulQueues = 0;
+                let lastFoundNextUrl = null;
 
-                    // Fallback: if first page returns zero results and we built a jobs-search URL
-                    // (not a user-provided startUrl), try the alternate candidate search format once.
-                    if (pagesProcessed === 1 && !triedCandidateFallback && !startUrl && !preferCandidateSearch) {
-                        try {
-                            const alt = buildCandidateSearchUrl(keyword, location, postedWithinDays, 1);
-                            if (alt && alt !== baseUrl && alt !== START_URL) {
-                                triedCandidateFallback = true;
-                                log.info(`No results on initial search page — enqueueing candidate-search fallback: ${alt}`);
-                                await enqueueLinks({
-                                    urls: [alt],
-                                    userData: { label: 'LIST', referer: START_URL },
-                                    forefront: true,
-                                    transformRequestFunction: (req) => {
-                                        req.uniqueKey = `${normalizeListUrl(req.url)}#LIST`;
-                                        return req;
-                                    },
-                                });
-                                // don't advance pagination on this page; let fallback run
-                                return;
-                            }
-                        } catch (err) {
-                            log.debug('Candidate fallback failed', err?.message || err);
-                        }
-                    }
-                }
+                for (let i = 0; i < pagesToQueue; i++) {
+                    const nextUrlRaw = i === 0 ? findNextPage($, currentUrl) : findNextPageByUrlOnly(currentUrl);
+                    const nextUrl = nextUrlRaw ? normalizeListUrl(nextUrlRaw) : null;
+                    lastFoundNextUrl = nextUrl;
 
-                let newAdded = 0;
+                    const currentNorm = normalizeListUrl(currentUrl);
+                    const isLoop = !nextUrl || nextUrl === currentNorm || PAGINATION_URLS_SEEN.has(nextUrl);
 
-                for (const card of cards) {
-                    const norm = normalizeJobUrl(card.url);
-                    if (SEEN_URLS.has(norm)) continue;
-                    SEEN_URLS.add(norm);
-                    newAdded++;
+                    if (!isLoop) {
+                        listPagesQueued++;
+                        PAGINATION_URLS_SEEN.add(nextUrl);
 
-                    const needsDetailVisit = collect_details && !cardHasRichData(card);
-
-                    if (!needsDetailVisit) {
-                        const record = buildOutputRecord({
-                            searchUrl: START_URL,
-                            scrapedAt: new Date().toISOString(),
-                            url: norm,
-                            referer: baseUrl,
-                            card,
-                        });
-                        await Dataset.pushData(record);
-                        pushed++;
-                    } else if (!QUEUED_DETAILS.has(norm)) {
-                        QUEUED_DETAILS.add(norm);
                         await enqueueLinks({
-                            urls: [norm],
-                            userData: { label: 'DETAIL', card, referer: baseUrl, originListUrl: baseUrl },
+                            urls: [nextUrl],
+                            userData: { label: 'LIST', referer: currentUrl },
+                            forefront: i < 2, // Prioritize first 2 pages
+                            transformRequestFunction: (req) => {
+                                // stable dedupe key for list pages
+                                req.uniqueKey = `${normalizeListUrl(req.url)}#LIST`;
+                                return req;
+                            },
                         });
+
+                        if (i === 0) {
+                            log.info(`Next page queued (#${listPagesQueued}): ${nextUrl.substring(0, 120)}...`);
+                        }
+
+                        currentUrl = nextUrl;
+                        successfulQueues++;
+                    } else {
+                        break;
                     }
                 }
 
-                log.info(`📄 LIST page ${pagesProcessed}: found ${cards.length} cards, new ${newAdded} → SEEN=${SEEN_URLS.size}, scraped=${pushed}/${results_wanted}`);
+                if (successfulQueues === 0) {
+                    if (stalled) {
+                        log.warning(`Pagination stalled (no new jobs for ${noProgressPages} pages).`);
+                    } else if (lastFoundNextUrl && PAGINATION_URLS_SEEN.has(lastFoundNextUrl)) {
+                        log.warning('Pagination loop detected - URL already seen');
+                    } else {
+                        log.warning(`No next page found after page ${pagesProcessed}. SEEN=${SEEN_URLS.size}, target=${results_wanted}`);
+                    }
 
-                // === PATCH: stall detector ===
-                if (newAdded === 0) {
-                    noProgressPages += 1;
-                } else {
-                    noProgressPages = 0;
-                    stallRecoveryAttempts = 0;
-                    // reset consecutive blocked pages counter
-                    blockedListPages = 0;
+                    const alt = tryAlternativePagination(baseUrl, pagesProcessed);
+                    const altNorm = alt ? normalizeListUrl(alt) : null;
+                    if (altNorm && !PAGINATION_URLS_SEEN.has(altNorm) && !stalled && pushed < results_wanted) {
+                        listPagesQueued++;
+                        PAGINATION_URLS_SEEN.add(altNorm);
+                        log.info(`Alternative page ${listPagesQueued}: ${altNorm.substring(0, 120)}...`);
+                        await enqueueLinks({
+                            urls: [altNorm],
+                            userData: { label: 'LIST', referer: baseUrl },
+                            forefront: true,
+                            transformRequestFunction: (req) => { req.uniqueKey = `${normalizeListUrl(req.url)}#LIST`; return req; },
+                        });
+                    }
                 }
-                const stalled = noProgressPages >= STALL_LIMIT;
+            } else {
+                if (stalled && (coverageShort || stillNeedJobs)) {
+                    if (stallRecoveryAttempts < MAX_STALL_RECOVERY) {
+                        stallRecoveryAttempts++;
+                        const shortfall = Math.max(results_wanted - pushed, desiredSeen - SEEN_URLS.size);
+                        const forcePages = Math.min(4, Math.max(1, Math.ceil(shortfall / Math.max(1, estimatedJobsPerPage))));
+                        let forcedCurrent = lastListUrlNorm || baseUrlNorm;
+                        let forcedQueued = 0;
+                        for (let i = 0; i < forcePages; i++) {
+                            const forcedRaw = findNextPageByUrlOnly(forcedCurrent);
+                            if (!forcedRaw) break;
+                            const forcedNorm = normalizeListUrl(forcedRaw);
+                            forcedCurrent = forcedNorm;
+                            if (PAGINATION_URLS_SEEN.has(forcedNorm)) continue;
 
-                // Enhanced pagination planning with higher lookahead
-                const estimatedJobsPerPage = cards.length > 0 ? cards.length : 20;
-                const desiredSeen = collect_details
-                    ? Math.max(results_wanted + 20, Math.ceil(results_wanted * 1.3))
-                    : results_wanted;
-                const remainingNeeded = desiredSeen - SEEN_URLS.size;
-                const pagesNeeded = Math.ceil(Math.max(0, remainingNeeded) / Math.max(1, estimatedJobsPerPage));
-                const pagesToQueue = Math.min(6, Math.max(0, pagesNeeded)); // wider lookahead for pagination stability
-
-                const stillNeedJobs = pushed < results_wanted;
-                const coverageShort = SEEN_URLS.size < desiredSeen;
-                const shouldContinue = (coverageShort || stillNeedJobs) &&
-                                       pagesProcessed < MAX_PAGES &&
-                                       listPagesQueued < MAX_PAGES * 2 &&
-                                       !stalled;
-
-                if (shouldContinue && pagesToQueue > 0) {
-                    let currentUrl = baseUrl;
-                    let successfulQueues = 0;
-                    let lastFoundNextUrl = null;
-
-                    for (let i = 0; i < pagesToQueue; i++) {
-                        const nextUrlRaw = i === 0 ? findNextPage($, currentUrl) : findNextPageByUrlOnly(currentUrl);
-                        const nextUrl = nextUrlRaw ? normalizeListUrl(nextUrlRaw) : null;
-                        lastFoundNextUrl = nextUrl;
-
-                        const currentNorm = normalizeListUrl(currentUrl);
-                        const isLoop = !nextUrl || nextUrl === currentNorm || PAGINATION_URLS_SEEN.has(nextUrl);
-
-                        if (!isLoop) {
                             listPagesQueued++;
-                            PAGINATION_URLS_SEEN.add(nextUrl);
-
+                            PAGINATION_URLS_SEEN.add(forcedNorm);
                             await enqueueLinks({
-                                urls: [nextUrl],
-                                userData: { label: 'LIST', referer: currentUrl },
-                                forefront: i < 2, // Prioritize first 2 pages
+                                urls: [forcedNorm],
+                                userData: { label: 'LIST', referer: baseUrl },
+                                forefront: i === 0,
                                 transformRequestFunction: (req) => {
-                                    // stable dedupe key for list pages
                                     req.uniqueKey = `${normalizeListUrl(req.url)}#LIST`;
                                     return req;
                                 },
                             });
+                            forcedQueued++;
+                        }
 
-                            if (i === 0) {
-                                log.info(`Next page queued (#${listPagesQueued}): ${nextUrl.substring(0, 120)}...`);
-                            }
-
-                            currentUrl = nextUrl;
-                            successfulQueues++;
-                        } else {
-                            break;
+                        if (forcedQueued > 0) {
+                            log.info(`Stall recovery attempt ${stallRecoveryAttempts}/${MAX_STALL_RECOVERY}: queued ${forcedQueued} fallback page(s).`);
+                            noProgressPages = Math.max(0, Math.floor(STALL_LIMIT / 2));
+                            return;
                         }
                     }
-
-                    if (successfulQueues === 0) {
-                        if (stalled) {
-                            log.warning(`Pagination stalled (no new jobs for ${noProgressPages} pages).`);
-                        } else if (lastFoundNextUrl && PAGINATION_URLS_SEEN.has(lastFoundNextUrl)) {
-                            log.warning('Pagination loop detected - URL already seen');
-                        } else {
-                            log.warning(`No next page found after page ${pagesProcessed}. SEEN=${SEEN_URLS.size}, target=${results_wanted}`);
-                        }
-
-                        const alt = tryAlternativePagination(baseUrl, pagesProcessed);
-                        const altNorm = alt ? normalizeListUrl(alt) : null;
-                        if (altNorm && !PAGINATION_URLS_SEEN.has(altNorm) && !stalled && pushed < results_wanted) {
-                            listPagesQueued++;
-                            PAGINATION_URLS_SEEN.add(altNorm);
-                            log.info(`Alternative page ${listPagesQueued}: ${altNorm.substring(0, 120)}...`);
-                            await enqueueLinks({
-                                urls: [altNorm],
-                                userData: { label: 'LIST', referer: baseUrl },
-                                forefront: true,
-                                transformRequestFunction: (req) => { req.uniqueKey = `${normalizeListUrl(req.url)}#LIST`; return req; },
-                            });
-                        }
-                    }
+                    log.info(`Stopping pagination after ${noProgressPages} empty pages (stall).`);
+                    noProgressPages = 0;
+                } else if (pagesProcessed >= MAX_PAGES) {
+                    log.warning(`Reached MAX_PAGES limit (${MAX_PAGES}).`);
+                } else if (pagesToQueue <= 0) {
+                    log.info('Enough jobs collected/queued for target buffer.');
+                } else if (pushed >= results_wanted) {
+                    log.info(`Job cap reached (${pushed}/${results_wanted}). Not queuing more pages.`);
                 } else {
-                    if (stalled && (coverageShort || stillNeedJobs)) {
-                        if (stallRecoveryAttempts < MAX_STALL_RECOVERY) {
-                            stallRecoveryAttempts++;
-                            const shortfall = Math.max(results_wanted - pushed, desiredSeen - SEEN_URLS.size);
-                            const forcePages = Math.min(4, Math.max(1, Math.ceil(shortfall / Math.max(1, estimatedJobsPerPage))));
-                            let forcedCurrent = lastListUrlNorm || baseUrlNorm;
-                            let forcedQueued = 0;
-                            for (let i = 0; i < forcePages; i++) {
-                                const forcedRaw = findNextPageByUrlOnly(forcedCurrent);
-                                if (!forcedRaw) break;
-                                const forcedNorm = normalizeListUrl(forcedRaw);
-                                forcedCurrent = forcedNorm;
-                                if (PAGINATION_URLS_SEEN.has(forcedNorm)) continue;
-
-                                listPagesQueued++;
-                                PAGINATION_URLS_SEEN.add(forcedNorm);
-                                await enqueueLinks({
-                                    urls: [forcedNorm],
-                                    userData: { label: 'LIST', referer: baseUrl },
-                                    forefront: i === 0,
-                                    transformRequestFunction: (req) => {
-                                        req.uniqueKey = `${normalizeListUrl(req.url)}#LIST`;
-                                        return req;
-                                    },
-                                });
-                                forcedQueued++;
-                            }
-
-                            if (forcedQueued > 0) {
-                                log.info(`Stall recovery attempt ${stallRecoveryAttempts}/${MAX_STALL_RECOVERY}: queued ${forcedQueued} fallback page(s).`);
-                                noProgressPages = Math.max(0, Math.floor(STALL_LIMIT / 2));
-                                return;
-                            }
-                        }
-                        log.info(`Stopping pagination after ${noProgressPages} empty pages (stall).`);
-                        noProgressPages = 0;
-                    } else if (pagesProcessed >= MAX_PAGES) {
-                        log.warning(`Reached MAX_PAGES limit (${MAX_PAGES}).`);
-                    } else if (pagesToQueue <= 0) {
-                        log.info('Enough jobs collected/queued for target buffer.');
-                    } else if (pushed >= results_wanted) {
-                        log.info(`Job cap reached (${pushed}/${results_wanted}). Not queuing more pages.`);
-                    } else {
-                        log.info(`Target buffer reached: SEEN=${SEEN_URLS.size} (target ${results_wanted}).`);
-                    }
+                    log.info(`Target buffer reached: SEEN=${SEEN_URLS.size} (target ${results_wanted}).`);
                 }
-
-                return;
             }
 
-            if (label === 'DETAIL') {
-                if (pushed >= results_wanted) return;
+            return;
+        }
 
-                const base = request.loadedUrl ?? request.url;
-                const detail = scrapeDetail($, base);
-                const record = buildOutputRecord({
-                    searchUrl: START_URL,
-                    scrapedAt: new Date().toISOString(),
-                    url: normalizeJobUrl(base),
-                    referer: request.userData.referer,
-                    card: request.userData.card || {},
-                    detail,
-                });
-                await Dataset.pushData(record);
-                pushed++;
+        if (label === 'DETAIL') {
+            if (pushed >= results_wanted) return;
 
-                if (pushed % 25 === 0 || pushed === results_wanted) {
-                    log.info(`📊 Progress: ${pushed}/${results_wanted} jobs scraped (${((pushed / results_wanted) * 100).toFixed(1)}%)`);
-                }
-                return;
-            }
-        },
-
-        failedRequestHandler: async ({ request, error, session }) => {
-            const statusCode = error?.statusCode || error?.response?.statusCode;
-            const is403or429 = statusCode === 403 || statusCode === 429;
-            
-            if (is403or429 && session) {
-                log.warning(`Blocking error ${statusCode} for ${request.url} - session ${session.id} retired`);
-                session.retire();
-                await storeBlockSample(request, error?.response?.body, `Failed request ${statusCode}`);
-            } else {
-                log.warning(`FAILED ${request.url}: ${error?.message || error}`);
-                if (session) session.markBad();
-            }
-            
-            await Dataset.pushData({
-                type: 'error',
-                url: request.url,
-                message: String(error?.message || error),
-                statusCode: statusCode || null,
-                label: request.userData?.label || null,
-                at: new Date().toISOString(),
+            const base = request.loadedUrl ?? request.url;
+            const detail = scrapeDetail($, base);
+            const record = buildOutputRecord({
+                searchUrl: START_URL,
+                scrapedAt: new Date().toISOString(),
+                url: normalizeJobUrl(base),
+                referer: request.userData.referer,
+                card: request.userData.card || {},
+                detail,
             });
-        },
+            await Dataset.pushData(record);
+            pushed++;
 
-    });
+            if (pushed % 25 === 0 || pushed === results_wanted) {
+                log.info(`📊 Progress: ${pushed}/${results_wanted} jobs scraped (${((pushed / results_wanted) * 100).toFixed(1)}%)`);
+            }
+            return;
+        }
+    },
 
-    log.info(`🚀 Starting crawler with target: ${results_wanted} jobs`);
-    log.info(`📍 Start URL: ${START_URL}`);
+    failedRequestHandler: async ({ request, error, session }) => {
+        const statusCode = error?.statusCode || error?.response?.statusCode;
+        const is403or429 = statusCode === 403 || statusCode === 429;
 
-    await crawler.run([{ url: START_URL, userData: { label: 'LIST', referer: buildSearchReferer() } }]);
+        if (is403or429 && session) {
+            log.warning(`Blocking error ${statusCode} for ${request.url} - session ${session.id} retired`);
+            session.retire();
+            await storeBlockSample(request, error?.response?.body, `Failed request ${statusCode}`);
+        } else {
+            log.warning(`FAILED ${request.url}: ${error?.message || error}`);
+            if (session) session.markBad();
+        }
 
-    // =============== Final report ===============
-    const finalCount = pushed;
-    const successRate = SEEN_URLS.size > 0 ? ((finalCount / SEEN_URLS.size) * 100).toFixed(1) : '0.0';
+        await Dataset.pushData({
+            type: 'error',
+            url: request.url,
+            message: String(error?.message || error),
+            statusCode: statusCode || null,
+            label: request.userData?.label || null,
+            at: new Date().toISOString(),
+        });
+    },
 
-    log.info(`
+});
+
+log.info(`🚀 Starting crawler with target: ${results_wanted} jobs`);
+log.info(`📍 Start URL: ${START_URL}`);
+
+await crawler.run([{ url: START_URL, userData: { label: 'LIST', referer: buildSearchReferer() } }]);
+
+// =============== Final report ===============
+const finalCount = pushed;
+const successRate = SEEN_URLS.size > 0 ? ((finalCount / SEEN_URLS.size) * 100).toFixed(1) : '0.0';
+
+log.info(`
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 ✓ SCRAPING COMPLETED
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -1488,33 +1416,17 @@ try {
   📊 Success Rate:    ${successRate}%
   ⚙️  Details Mode:    ${collect_details ? 'ON' : 'OFF'}
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-    `);
+`);
 
-    if (finalCount < results_wanted) {
-        const ratio = (finalCount / results_wanted * 100).toFixed(0);
-        log.warning(`⚠️  Only scraped ${finalCount}/${results_wanted} jobs (${ratio}%)`);
-        log.warning(`Possible reasons:`);
-        log.warning(`  • Not enough jobs available for this query`);
-        log.warning(`  • Pagination stopped (loop/stall guarded)`);
-        log.warning(`  • Some detail pages failed (see error logs)`);
-        log.warning(`  • Site structure may have changed`);
-    }
-
-    log.info('✓ Actor completed successfully');
-    await Actor.exit();
-} catch (error) {
-    log.error('❌ Actor failed with error:', error);
-    log.error('Stack trace:', error.stack);
-    
-    // Push error information to dataset for debugging
-    await Dataset.pushData({
-        type: 'fatal_error',
-        message: error.message,
-        stack: error.stack,
-        timestamp: new Date().toISOString(),
-    });
-    
-    // Exit with error but in a controlled manner
-    await Actor.fail(error.message);
+if (finalCount < results_wanted) {
+    const ratio = (finalCount / results_wanted * 100).toFixed(0);
+    log.warning(`⚠️  Only scraped ${finalCount}/${results_wanted} jobs (${ratio}%)`);
+    log.warning(`Possible reasons:`);
+    log.warning(`  • Not enough jobs available for this query`);
+    log.warning(`  • Pagination stopped (loop/stall guarded)`);
+    log.warning(`  • Some detail pages failed (see error logs)`);
+    log.warning(`  • Site structure may have changed`);
 }
+
+await Actor.exit();
 
