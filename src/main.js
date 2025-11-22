@@ -6,7 +6,7 @@
 import { Actor, log, KeyValueStore } from 'apify';
 import { CheerioCrawler, Dataset } from 'crawlee';
 import { gotScraping } from 'got-scraping';
-import HeaderGenerator from 'header-generator';
+import { HeaderGenerator } from 'header-generator';
 
 // =============== Small utilities ===============
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
