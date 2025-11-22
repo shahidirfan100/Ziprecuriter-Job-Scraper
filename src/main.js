@@ -978,7 +978,7 @@ try {
     
     let {
         startUrl,
-        keyword = 'Software Engineer',
+        keyword = 'developer',
         location = '',
         postedWithin = 'any',
         results_wanted = 100,
@@ -1056,6 +1056,10 @@ try {
     const MAX_STALL_RECOVERY = 4;
     let stallRecoveryAttempts = 0;
     let lastListUrlNorm = null;
+    // consecutive blocked list pages counter to stop pagination when server starts blocking
+    let blockedListPages = 0;
+    // track if we've already tried the alternate candidate-search URL as a fallback
+    let triedCandidateFallback = false;
 
     // PATCH: derived ceiling to prevent "requests storm" when site loops
     const MAX_REQS = Number.isFinite(maxRequestsPerCrawl) && maxRequestsPerCrawl > 0
@@ -1154,7 +1158,31 @@ try {
                     session.markBad();
                 }
                 await storeBlockSample(request, body, `HTTP ${response?.statusCode}`);
-                throw new Error(`Blocked (${response.statusCode})`);
+
+                try {
+                    await Dataset.pushData({
+                        type: 'blocked',
+                        url: request.url,
+                        statusCode: response?.statusCode || null,
+                        label: request.userData?.label || null,
+                        at: new Date().toISOString(),
+                    });
+                } catch (e) {
+                    log.debug('Failed to record blocked event', e?.message || e);
+                }
+
+                // For list pages, track consecutive blocked pages and stop pagination if it keeps happening
+                if (request.userData?.label === 'LIST') {
+                    blockedListPages++;
+                    log.warning(`Consecutive blocked LIST pages: ${blockedListPages}`);
+                    if (blockedListPages >= 3) {
+                        log.warning('Too many consecutive blocked list pages — stopping pagination to avoid further blocks');
+                        noProgressPages = STALL_LIMIT; // force pagination stop
+                    }
+                }
+
+                // Treat blocked response as handled (don't throw) — skip processing of this page
+                return;
             }
             
             const bodyText = ($('title').text() + ' ' + $('.error, .captcha, #challenge-running, .cf-error-details').text()).toLowerCase();
@@ -1183,6 +1211,41 @@ try {
                 // soft warn only; do NOT abort crawl
                 if (cards.length === 0) {
                     log.warning(`⚠ No job cards parsed on page ${pagesProcessed}. URL: ${baseUrl}`);
+
+                    // Diagnostic: log quick facts that help QA identify why parsing failed
+                    try {
+                        const structuredJobs = extractStructuredJobs($);
+                        const anchorCount = $('a[href*="/job"], a[href*="/jobs/"], a[data-job-id]').length;
+                        const snippet = ($('main, #results, #search-results').first().text() || $('body').text() || '').slice(0, 600);
+                        log.info(`Diagnostics: status=${response?.statusCode ?? 'n/a'}, anchors=${anchorCount}, structuredJobs=${structuredJobs.length}, snippet=[${snippet.replace(/\s+/g,' ').slice(0,200)}]`);
+                    } catch (dE) {
+                        log.debug('Diagnostics failed', dE?.message || dE);
+                    }
+
+                    // Fallback: if first page returns zero results and we built a jobs-search URL
+                    // (not a user-provided startUrl), try the alternate candidate search format once.
+                    if (pagesProcessed === 1 && !triedCandidateFallback && !startUrl && !preferCandidateSearch) {
+                        try {
+                            const alt = buildCandidateSearchUrl(keyword, location, postedWithinDays, 1);
+                            if (alt && alt !== baseUrl && alt !== START_URL) {
+                                triedCandidateFallback = true;
+                                log.info(`No results on initial search page — enqueueing candidate-search fallback: ${alt}`);
+                                await enqueueLinks({
+                                    urls: [alt],
+                                    userData: { label: 'LIST', referer: START_URL },
+                                    forefront: true,
+                                    transformRequestFunction: (req) => {
+                                        req.uniqueKey = `${normalizeListUrl(req.url)}#LIST`;
+                                        return req;
+                                    },
+                                });
+                                // don't advance pagination on this page; let fallback run
+                                return;
+                            }
+                        } catch (err) {
+                            log.debug('Candidate fallback failed', err?.message || err);
+                        }
+                    }
                 }
 
                 let newAdded = 0;
@@ -1222,6 +1285,8 @@ try {
                 } else {
                     noProgressPages = 0;
                     stallRecoveryAttempts = 0;
+                    // reset consecutive blocked pages counter
+                    blockedListPages = 0;
                 }
                 const stalled = noProgressPages >= STALL_LIMIT;
 

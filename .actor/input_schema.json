@@ -15,8 +15,8 @@
       "type": "string",
       "description": "Search term(s) for jobs (e.g., 'Software Developer', 'React', 'Data Analyst').",
       "editor": "textfield",
-      "default": "Software Engineer",
-      "prefill": "Software Engineer"
+      "default": "developer",
+      "prefill": "developer"
     },
     "location": {
       "title": "Location",
@@ -24,7 +24,7 @@
       "description": "The job location to filter by (e.g., 'New York, NY', 'Remote', 'San Francisco').",
       "editor": "textfield",
       "default": "",
-      "prefill": "New York, NY"
+      "prefill": ""
     },
     "postedWithin": {
       "title": "Date Posted",
