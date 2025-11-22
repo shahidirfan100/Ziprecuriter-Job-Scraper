@@ -1,14 +1,15 @@
 {
-  "query": "admin",
-  "location": "Worldwide",
-  "timeRange": "24h",
-  "maxJobs": 50,
-  "collectOnly": false,
-  "maxConcurrency": 5,
+  "keyword": "Software Engineer",
+  "location": "New York, NY",
+  "postedWithin": "any",
+  "results_wanted": 50,
+  "collect_details": true,
+  "maxConcurrency": 10,
   "proxyConfiguration": {
     "useApifyProxy": true,
-    "groups": [
+    "apifyProxyGroups": [
       "RESIDENTIAL"
-    ]
+    ],
+    "countryCode": "US"
   }
 }

@@ -8,22 +8,23 @@
       "title": "Start URL (optional)",
       "type": "string",
       "description": "A specific ZipRecruiter URL to start scraping from. If provided, it overrides Keyword, Location, and Date Posted filters.",
-      "editor": "textfield",
-      "prefill": "https://www.ziprecruiter.com/jobs/..."
+      "editor": "textfield"
     },
     "keyword": {
       "title": "Keyword",
       "type": "string",
       "description": "Search term(s) for jobs (e.g., 'Software Developer', 'React', 'Data Analyst').",
       "editor": "textfield",
-      "default": "Software Engineer"
+      "default": "Software Engineer",
+      "prefill": "Software Engineer"
     },
     "location": {
       "title": "Location",
       "type": "string",
       "description": "The job location to filter by (e.g., 'New York, NY', 'Remote', 'San Francisco').",
       "editor": "textfield",
-      "prefill": ""
+      "default": "",
+      "prefill": "New York, NY"
     },
     "postedWithin": {
       "title": "Date Posted",
@@ -50,6 +51,7 @@
       "description": "The maximum number of job listings to scrape.",
       "editor": "number",
       "default": 100,
+      "prefill": 50,
       "minimum": 1,
       "maximum": 10000
     },
