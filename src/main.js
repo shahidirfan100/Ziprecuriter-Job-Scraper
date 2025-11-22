@@ -1052,22 +1052,7 @@ const crawler = new CheerioCrawler({
     navigationTimeoutSecs: requestHandlerTimeoutSecs + 10,
     useSessionPool: true,
     persistCookiesPerSession: true,
-    requestFunction: async ({ request, proxyInfo }) => {
-        const proxyUrl = proxyInfo?.url;
-        const response = await gotScraping({
-            url: request.url,
-            method: request.method,
-            headers: request.headers,
-            proxyUrl,
-            timeout: {
-                request: requestHandlerTimeoutSecs * 1000,
-            },
-            http2: true,
-            throwHttpErrors: false,
-            decompress: true,
-        });
-        return response;
-    },
+
     sessionPoolOptions: {
         maxPoolSize: Math.max(48, effectiveMaxConcurrency * 14),
         sessionOptions: {
