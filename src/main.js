@@ -976,6 +976,7 @@ const buildJobsUrl = (kw, loc, postedWithinDays, page = 1, jobsPerPage = 20) => 
     url.searchParams.set('jobs_per_page', String(Math.max(10, Math.min(100, jobsPerPage))));
     if (kw && kw.trim()) url.searchParams.set('search', kw.trim());
     if (loc && loc.trim()) url.searchParams.set('location', loc.trim());
+    else url.searchParams.set('location', 'United States'); // Force US location to prevent geo-redirects
     if (postedWithinDays) url.searchParams.set('days', String(postedWithinDays));
     return url.href;
 };
@@ -1155,6 +1156,15 @@ const crawler = new CheerioCrawler({
             }
             await storeBlockSample(request, body, `HTTP ${response?.statusCode}`);
             throw new Error(`Blocked (${response.statusCode})`);
+        }
+
+        // Geographic redirect detection (CRITICAL FIX)
+        const loadedUrl = request.loadedUrl || request.url;
+        if (!loadedUrl.includes('ziprecruiter.com') && !loadedUrl.includes('localhost')) {
+            log.error(`❌ Geographic redirect detected! Redirected to: ${loadedUrl}`);
+            log.error(`Original URL: ${request.url}`);
+            log.error(`Solution: Use US-based residential proxies or set location parameter to "United States".`);
+            throw new Error(`Geographic redirect to ${new URL(loadedUrl).hostname} - Aborting to prevent bad data.`);
         }
 
         const bodyText = ($('title').text() + ' ' + $('.error, .captcha, #challenge-running, .cf-error-details').text()).toLowerCase();
