@@ -752,13 +752,25 @@ const scrapeCards = ($, baseUrl) => {
     if (structured.length) jobs.push(...structured);
 
     const LINK_SEL = [
-        'a.job_link', 'a.job-link', 'a.t_job_link',
+        // Modern ZipRecruiter selectors (2024-2025)
         'a[data-job-id]',
+        'a[data-testid*="job"]',
+        'article[data-job-id] a',
+        '[data-testid="job-card"] a',
+        '[data-testid="jobCard"] a',
+        'div[data-job-id] a',
+
+        // Legacy selectors
+        'a.job_link', 'a.job-link', 'a.t_job_link',
         'a[href*="/c/"][href*="/Job/"]',
         'a[href*="/job/"]',
         'a[href*="/jobs/"][href*="jid="]',
         'article a[href*="/job"]',
         '.job-card a', '.job_card a', '[class*="jobCard"] a',
+
+        // Broad fallbacks
+        'a[href*="ziprecruiter.com/c/"]',
+        'a[href*="ziprecruiter.com/jobs/"]',
     ].join(',');
 
     $(LINK_SEL).each((_, el) => {
@@ -1168,16 +1180,44 @@ const crawler = new CheerioCrawler({
             // parse cards
             const cards = scrapeCards($, baseUrl);
 
-            // soft warn only; do NOT abort crawl
+            // Enhanced empty results handling with HTML sampling
             if (cards.length === 0) {
                 log.warning(`⚠ No job cards parsed on page ${pagesProcessed}. URL: ${baseUrl}`);
-                log.info(`DEBUG: Title: ${$('title').text()}`);
-                log.info(`DEBUG: HTML length: ${$.html().length}`);
-                const scripts = $('script').length;
-                const jsonLd = $('script[type="application/ld+json"]').length;
-                log.info(`DEBUG: Scripts: ${scripts}, JSON-LD: ${jsonLd}`);
-                const bodyText = $('body').text().slice(0, 200);
-                log.info(`DEBUG: Body start: ${bodyText.replace(/\s+/g, ' ')}`);
+                const pageTitle = $('title').text();
+                const htmlLength = $.html().length;
+
+                // Debug: Check for blocking indicators
+                const bodyLower = $('body').text().toLowerCase();
+                if (bodyLower.includes('blocked') || bodyLower.includes('captcha') || bodyLower.includes('access denied')) {
+                    log.error('🚫 Possible blocking detected on empty page');
+                    await storeBlockSample(request, body, 'Empty page with blocking indicators');
+                } else {
+                    log.warning(`Page title: "${pageTitle}", HTML: ${htmlLength} bytes`);
+
+                    // Debug: Check selector matches
+                    log.info(`DEBUG: Checking selectors...`);
+                    log.info(`DEBUG: a[data-job-id]: ${$('a[data-job-id]').length}`);
+                    log.info(`DEBUG: article: ${$('article').length}`);
+                    log.info(`DEBUG: div[data-job-id]: ${$('div[data-job-id]').length}`);
+                    log.info(`DEBUG: a[href*="/job"]: ${$('a[href*="/job"]').length}`);
+                    log.info(`DEBUG: script tags: ${$('script').length}`);
+                    log.info(`DEBUG: JSON-LD: ${$('script[type="application/ld+json"]').length}`);
+
+                    // Sample first few links for debugging
+                    const sampleLinks = $('a').slice(0, 10).map((_, el) => $(el).attr('href')).get();
+                    log.info(`DEBUG: Sample links: ${JSON.stringify(sampleLinks.slice(0, 5))}`);
+
+                    // Save HTML sample for first empty page only
+                    if (pagesProcessed === 1) {
+                        await KeyValueStore.setValue('EMPTY_FIRST_PAGE', {
+                            url: baseUrl,
+                            title: pageTitle,
+                            htmlPreview: $.html().substring(0, 50000),
+                            timestamp: new Date().toISOString(),
+                        });
+                        log.info('💾 Saved first empty page HTML sample for debugging');
+                    }
+                }
             }
 
             let newAdded = 0;
