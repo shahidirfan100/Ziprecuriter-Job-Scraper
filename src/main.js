@@ -104,6 +104,16 @@ const buildOutputRecord = ({ searchUrl, scrapedAt, url, referer, card = {}, deta
     };
 };
 
+// =============== Validation helpers ===============
+const isValidJobRecord = (record) => {
+    return record && record.title && record.url && record.source;
+};
+
+const getMissingFields = (record) => {
+    const required = ['title', 'url', 'source'];
+    return required.filter(field => !record || !record[field]);
+};
+
 // =============== Config helpers ===============
 const POSTED_WITHIN_MAP = new Map([
     ['any', null],
