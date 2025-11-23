@@ -11,6 +11,24 @@
       "editor": "textfield"
     },
     "keyword": {
+      "title": "Keyword",
+      "type": "string",
+      "description": "Search term(s) for jobs (e.g., 'Software Developer', 'React', 'Data Analyst').",
+      "editor": "textfield",
+      "default": "developer",
+      "prefill": "developer"
+    },
+    "location": {
+      "title": "Location",
+      "type": "string",
+      "description": "Location to search for jobs (e.g. 'San Francisco, CA', 'New York'). Defaults to 'United States' to prevent geographic redirects.",
+      "default": "United States",
+      "editor": "textfield"
+    },
+    "postedWithin": {
+      "title": "Date Posted",
+      "type": "string",
+      "description": "Filter by how recently the job was posted. Note: This filter only works when using Keyword search (not with custom Start URL).",
       "editor": "select",
       "enum": [
         "any",
