@@ -14,7 +14,7 @@ const DEFAULT_MAX_DETAIL_CONCURRENCY = 3;
 
 /**
  * Fallback builder when no startUrl is provided.
- * ZipRecruiter does support /jobs-search with search/location params.
+ * ZipRecruiter supports /jobs-search with search/location params.
  * We still strongly prefer startUrl to keep behaviour aligned with browser.
  */
 const buildSearchUrl = (keyword, location, page = 1) => {
@@ -99,12 +99,44 @@ const dismissPopupsPlaywright = async (page) => {
     }
 };
 
+// Try to close/skip opt-in / overlays / modals that block job list.
+const handleOptInFlow = async (page) => {
+    const skipSelectors = [
+        'button:has-text("Skip")',
+        'button:has-text("No thanks")',
+        'button:has-text("Not now")',
+        'button:has-text("Maybe later")',
+        'button:has-text("Continue without")',
+        'button:has-text("Continue as guest")',
+        '[data-testid*="skip"]',
+        '[data-testid*="dismiss"]',
+        '[data-testid*="close"]',
+        '[aria-label*="close"]',
+        '.modal-close',
+        '.close',
+        '.close-button',
+    ];
+
+    for (const selector of skipSelectors) {
+        try {
+            const btn = page.locator(selector).first();
+            if (await btn.isVisible({ timeout: 1000 }).catch(() => false)) {
+                await btn.click().catch(() => {});
+                await page.waitForTimeout(800);
+            }
+        } catch {
+            // ignore individual selector failures
+        }
+    }
+};
+
 /**
  * Playwright handshake:
  * - gets HTML for the first page
  * - grabs cookies
  * - sets a realistic UA & viewport
- * This is used once; all subsequent requests are got-scraping.
+ * - extracts initial job anchors (URL + title) from live DOM
+ * This is used once; all subsequent listing + detail pages are got-scraping.
  */
 const doPlaywrightHandshake = async (url) => {
     const fp = randomFingerprint();
@@ -149,8 +181,9 @@ const doPlaywrightHandshake = async (url) => {
         });
 
         await dismissPopupsPlaywright(page);
+        await handleOptInFlow(page);
 
-        // Wait explicitly for something that looks like job results
+        // Wait explicitly for something that looks like job results or job links
         try {
             await page.waitForSelector(
                 [
@@ -161,11 +194,11 @@ const doPlaywrightHandshake = async (url) => {
                     '.job_result_card',
                     'section[role="list"] article',
                     'a[href*="/jobs/"]',
+                    'a[href*="/job/"]',
                 ].join(','),
-                { timeout: 15000 },
+                { timeout: 20000 },
             );
         } catch {
-            // If this fails, we'll still grab HTML and try DOM parsing.
             log.debug('Handshake: job selector not found before timeout');
         }
 
@@ -176,6 +209,55 @@ const doPlaywrightHandshake = async (url) => {
         } catch {
             // ignore
         }
+
+        // Extract job links directly from DOM (URL + title only; rest from detail pages)
+        const initialJobs = await page
+            .evaluate(() => {
+                const anchors = Array.from(
+                    document.querySelectorAll('a[href*="/jobs/"], a[href*="/job/"]'),
+                );
+                const seen = new Set();
+                const jobs = [];
+
+                for (const a of anchors) {
+                    const hrefRaw = a.getAttribute('href') || '';
+                    if (!hrefRaw) continue;
+
+                    // Ignore search / filters / nav links
+                    if (hrefRaw.includes('/jobs-search')) continue;
+                    if (hrefRaw.startsWith('#')) continue;
+
+                    let fullUrl;
+                    try {
+                        fullUrl = new URL(hrefRaw, window.location.origin).href;
+                    } catch {
+                        continue;
+                    }
+
+                    if (seen.has(fullUrl)) continue;
+                    const title = (a.textContent || '').replace(/\s+/g, ' ').trim();
+                    if (!title || title.length < 2 || title.length > 160) continue;
+
+                    // avoid obvious nav/header/footer links
+                    const inNavOrFooter = !!a.closest('header,nav,footer');
+                    if (inNavOrFooter) continue;
+
+                    jobs.push({
+                        source: 'ziprecruiter',
+                        listing_page_url: window.location.href,
+                        title,
+                        company: null,
+                        location: null,
+                        salary: null,
+                        date_posted: null,
+                        url: fullUrl,
+                    });
+                    seen.add(fullUrl);
+                }
+
+                return jobs;
+            })
+            .catch(() => []);
 
         const html = await page.content();
         const cookies = await context.cookies();
@@ -188,12 +270,14 @@ const doPlaywrightHandshake = async (url) => {
         log.info('Playwright handshake done', {
             cookieBytes: cookieHeader.length,
             htmlBytes: html.length,
+            initialJobs: initialJobs.length,
         });
 
         return {
             html,
             cookieHeader,
             userAgent: ua,
+            initialJobs,
         };
     } catch (err) {
         log.warning('Playwright handshake failed', { error: err.message ?? String(err) });
@@ -202,6 +286,7 @@ const doPlaywrightHandshake = async (url) => {
             html: '',
             cookieHeader: '',
             userAgent: randomFingerprint().ua,
+            initialJobs: [],
         };
     }
 };
@@ -257,7 +342,7 @@ const normalizeUrl = (href) => {
 };
 
 /**
- * DOM-based listing parser for ZipRecruiter.
+ * DOM-based listing parser for ZipRecruiter using Cheerio.
  * We try specific card selectors, then fallback to generic h2/h3-based parsing.
  */
 const extractJobsFromDom = (html, pageUrl) => {
@@ -524,6 +609,7 @@ Actor.main(async () => {
         detailConcurrency,
         handshakeAttempted: false,
         handshakeSucceeded: false,
+        handshakeInitialJobs: 0,
         pagesFetched: 0,
         pagesFailed: 0,
         pagesBlockedOrCaptcha: 0,
@@ -559,15 +645,18 @@ Actor.main(async () => {
     let handshakeHtml = '';
     let handshakeCookieHeader = '';
     let handshakeUserAgent = randomFingerprint().ua;
+    let handshakeInitialJobs = [];
 
     const handshakeResult = await doPlaywrightHandshake(handshakeUrl);
     handshakeHtml = handshakeResult.html || '';
     handshakeCookieHeader = handshakeResult.cookieHeader || '';
     handshakeUserAgent = handshakeResult.userAgent || handshakeUserAgent;
+    handshakeInitialJobs = handshakeResult.initialJobs || [];
     stats.handshakeSucceeded = Boolean(handshakeHtml && handshakeCookieHeader);
+    stats.handshakeInitialJobs = handshakeInitialJobs.length;
 
     if (!stats.handshakeSucceeded) {
-        log.warning('Continuing with HTTP-only mode (handshake did not succeed)');
+        log.warning('Continuing with HTTP-only mode (handshake did not fully succeed)');
     }
 
     let savedCount = 0;
@@ -580,19 +669,39 @@ Actor.main(async () => {
             : buildSearchUrl(keyword.trim(), location.trim(), pageNum);
 
         let html;
+        let jobs;
+
         try {
-            // Use handshake HTML for the first page if available
-            if (pageNum === 1 && handshakeHtml) {
+            // PAGE 1: Prefer jobs extracted directly from Playwright DOM if we have them
+            if (pageNum === 1 && handshakeInitialJobs.length > 0) {
                 html = handshakeHtml;
-                log.info('Using HTML from Playwright handshake for page 1');
-            } else {
-                const proxyUrl = proxyConfiguration ? await proxyConfiguration.newUrl() : undefined;
-                html = await httpFetchHtml({
-                    url: listingUrl,
-                    userAgent: handshakeUserAgent,
-                    cookieHeader: handshakeCookieHeader,
-                    proxyUrl,
+                jobs = handshakeInitialJobs;
+                log.info('Using jobs extracted from Playwright handshake for page 1', {
+                    count: jobs.length,
                 });
+            } else {
+                // Either page > 1, or handshake had no jobs -> fetch via HTTP and parse DOM
+                if (pageNum === 1 && handshakeHtml) {
+                    html = handshakeHtml;
+                    log.info('Using HTML from Playwright handshake for page 1 (DOM parse)');
+                } else {
+                    const proxyUrl = proxyConfiguration ? await proxyConfiguration.newUrl() : undefined;
+                    html = await httpFetchHtml({
+                        url: listingUrl,
+                        userAgent: handshakeUserAgent,
+                        cookieHeader: handshakeCookieHeader,
+                        proxyUrl,
+                    });
+                }
+
+                if (looksBlockedHtml(html)) {
+                    stats.pagesBlockedOrCaptcha++;
+                    stats.stoppedReason = 'BLOCKED_HTML_LISTING';
+                    log.warning('Blocked page HTML detected, stopping pagination', { url: listingUrl });
+                    break;
+                }
+
+                jobs = extractJobsFromDom(html, listingUrl);
             }
         } catch (err) {
             stats.pagesFailed++;
@@ -615,23 +724,13 @@ Actor.main(async () => {
             break;
         }
 
-        if (looksBlockedHtml(html)) {
-            stats.pagesBlockedOrCaptcha++;
-            stats.stoppedReason = 'BLOCKED_HTML_LISTING';
-            log.warning('Blocked page HTML detected, stopping pagination', { url: listingUrl });
-            break;
-        }
-
         stats.pagesFetched++;
 
-        const jobs = extractJobsFromDom(html, listingUrl);
-        stats.jobsFromDomFallback += jobs.length;
-
-        if (!jobs.length) {
+        if (!jobs || !jobs.length) {
             // Extra debug only on first page to avoid huge logs
-            if (pageNum === 1) {
+            if (pageNum === 1 && html) {
                 const snippet = html.slice(0, 1000).replace(/\s+/g, ' ');
-                log.debug('First page HTML snippet (no jobs parsed):', { snippet });
+                log.info('First page HTML snippet (no jobs parsed):', { snippet });
             }
 
             log.warning('No jobs parsed from listing page; stopping pagination.', {
@@ -641,6 +740,8 @@ Actor.main(async () => {
             stats.stoppedReason = pageNum === 1 ? 'NO_JOBS_ON_FIRST_PAGE' : 'NO_JOBS_ON_PAGE';
             break;
         }
+
+        stats.jobsFromDomFallback += jobs.length;
 
         log.info(`Parsed ${jobs.length} jobs from listing page`, {
             pageNum,
