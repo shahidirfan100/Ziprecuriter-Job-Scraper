@@ -40,16 +40,19 @@ const buildPageUrlFromStart = (startUrl, page) => {
 // --- FINGERPRINT & STEALTH ----------------------------------------------------
 
 const randomFingerprint = () => {
-    const mobile = Math.random() < 0.3;
+    const mobile = Math.random() < 0.2; // Lower mobile probability
     if (mobile) {
         return {
-            ua: 'Mozilla/5.0 (Linux; Android 14; Pixel 7 Pro) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36',
+            ua: 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_1 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.1 Mobile/15E148 Safari/604.1',
             viewport: { width: 390, height: 844 },
         };
     }
+    // Use recent Chrome versions on Windows
+    const chromeVersions = ['120.0.0.0', '121.0.0.0', '122.0.0.0', '123.0.0.0', '124.0.0.0'];
+    const version = chromeVersions[Math.floor(Math.random() * chromeVersions.length)];
     return {
-        ua: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
-        viewport: { width: 1366, height: 768 },
+        ua: `Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/${version} Safari/537.36`,
+        viewport: { width: 1920, height: 1080 },
     };
 };
 
@@ -62,6 +65,12 @@ const looksBlockedHtml = (html = '') => {
         'access denied',
         'temporary blocked',
         '/captcha/',
+        'just a moment',
+        'checking your browser',
+        'enable javascript and cookies',
+        'cloudflare',
+        'cf-browser-verification',
+        'challenge-running',
     ];
     return markers.some((m) => lower.includes(m));
 };
@@ -146,20 +155,58 @@ const doPlaywrightHandshake = async (url) => {
 
         browser = await chromium.launch({
             headless: true,
+            args: [
+                '--disable-blink-features=AutomationControlled',
+                '--disable-dev-shm-usage',
+                '--no-sandbox',
+                '--disable-setuid-sandbox',
+                '--disable-web-security',
+                '--disable-features=IsolateOrigins,site-per-process',
+            ],
         });
 
         const context = await browser.newContext({
             userAgent: fp.ua,
             viewport: fp.viewport,
+            locale: 'en-US',
+            timezoneId: 'America/New_York',
+            permissions: ['geolocation'],
+            geolocation: { longitude: -122.4194, latitude: 37.7749 },
         });
 
-        // Basic navigator hardening
+        // Enhanced navigator hardening to bypass Cloudflare
         await context.addInitScript(() => {
             try {
-                Object.defineProperty(navigator, 'webdriver', { get: () => false });
+                // Hide webdriver
+                Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
+                
+                // Fake plugins
+                Object.defineProperty(navigator, 'plugins', {
+                    get: () => [
+                        { name: 'Chrome PDF Plugin', filename: 'internal-pdf-viewer' },
+                        { name: 'Chrome PDF Viewer', filename: 'mhjfbmdgcfjbbpaeojofohoefgiehjai' },
+                        { name: 'Native Client', filename: 'internal-nacl-plugin' },
+                    ],
+                });
+                
+                // Fake languages
                 Object.defineProperty(navigator, 'languages', { get: () => ['en-US', 'en'] });
                 Object.defineProperty(navigator, 'platform', { get: () => 'Win32' });
-                window.chrome = window.chrome || { runtime: {} };
+                
+                // Fake chrome runtime
+                window.chrome = {
+                    runtime: {},
+                    loadTimes: () => ({}),
+                    csi: () => ({}),
+                    app: {},
+                };
+                
+                // Override permissions query
+                const originalQuery = window.navigator.permissions.query;
+                window.navigator.permissions.query = (parameters) =>
+                    parameters.name === 'notifications'
+                        ? Promise.resolve({ state: Notification.permission })
+                        : originalQuery(parameters);
             } catch {
                 // ignore
             }
@@ -167,18 +214,41 @@ const doPlaywrightHandshake = async (url) => {
 
         const page = await context.newPage();
 
-        // Block heavy resources
+        // Block heavy resources but allow scripts (needed for Cloudflare)
         await page.route('**/*', (route) => {
             const type = route.request().resourceType();
-            if (['image', 'media', 'font', 'stylesheet'].includes(type)) {
+            if (['image', 'media', 'font'].includes(type)) {
                 return route.abort();
             }
             return route.continue();
         });
 
-        await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 45000 }).catch((err) => {
+        // Navigate and wait for network to settle (important for Cloudflare)
+        await page.goto(url, { waitUntil: 'networkidle', timeout: 60000 }).catch((err) => {
             log.warning('Handshake goto() issue', { message: err.message ?? String(err) });
         });
+
+        // Check if we're on Cloudflare challenge page and wait for it to resolve
+        let attempts = 0;
+        const maxAttempts = 10;
+        while (attempts < maxAttempts) {
+            const pageTitle = await page.title();
+            const pageContent = await page.content();
+            
+            if (pageTitle.toLowerCase().includes('just a moment') || 
+                pageContent.toLowerCase().includes('checking your browser') ||
+                pageContent.toLowerCase().includes('cf-browser-verification')) {
+                log.info('Cloudflare challenge detected, waiting...', { attempt: attempts + 1 });
+                await page.waitForTimeout(3000);
+                attempts++;
+            } else {
+                break;
+            }
+        }
+        
+        if (attempts >= maxAttempts) {
+            log.warning('Cloudflare challenge did not resolve after maximum attempts');
+        }
 
         await dismissPopupsPlaywright(page);
         await handleOptInFlow(page);
@@ -353,6 +423,7 @@ const extractJobsFromDom = (html, pageUrl) => {
     const seen = new Set();
     const jobs = [];
 
+    // ZipRecruiter uses various card structures
     const cardSelectors = [
         'article[data-job-id]',
         'div[data-job-id]',
@@ -360,6 +431,11 @@ const extractJobsFromDom = (html, pageUrl) => {
         '.job_result',
         '.job_result_card',
         'section[role="list"] article',
+        '.job-listing',
+        '.jobList article',
+        '[class*="JobCard"]',
+        '[class*="job-card"]',
+        '[class*="job_card"]',
     ];
 
     let cards = [];
@@ -367,6 +443,7 @@ const extractJobsFromDom = (html, pageUrl) => {
         const found = $(sel).toArray();
         if (found.length > 0) {
             cards = found;
+            log.debug('Found job cards with selector', { selector: sel, count: found.length });
             break;
         }
     }
@@ -396,14 +473,17 @@ const extractJobsFromDom = (html, pageUrl) => {
 
             const titleEl =
                 c.find('a[data-testid="job-title"]').first() ||
+                c.find('h2 a').first() ||
                 c.find('a[href*="/jobs/"]').first() ||
-                c.find('h2 a, h2, h3 a, h3').first();
+                c.find('a[href*="/job/"]').first() ||
+                c.find('h2, h3').first();
 
             const title = titleEl.text().replace(/\s+/g, ' ').trim();
 
             let company =
                 c.find('[data-testid="company-name"]').first().text().replace(/\s+/g, ' ').trim() ||
-                c.find('.job_result_company, .company_name, .company').first().text().replace(/\s+/g, ' ').trim();
+                c.find('.job_result_company, .company_name, .company').first().text().replace(/\s+/g, ' ').trim() ||
+                c.find('a[href*="/co/"]').first().text().replace(/\s+/g, ' ').trim();
 
             let location =
                 c.find('[data-testid="location"]').first().text().replace(/\s+/g, ' ').trim() ||
@@ -413,9 +493,20 @@ const extractJobsFromDom = (html, pageUrl) => {
                 c.find('[data-testid="salary"]').first().text().replace(/\s+/g, ' ').trim() ||
                 c.find('.job_result_salary, .salary').first().text().replace(/\s+/g, ' ').trim();
 
+            // Try to extract salary from card text if not found
+            if (!salary) {
+                const cardText = c.text();
+                const salaryMatch = cardText.match(/\$[\d,]+(?:\s*-\s*\$[\d,]+)?(?:\/(?:hr|year|yr|month|mo))?/i);
+                if (salaryMatch) {
+                    salary = salaryMatch[0].trim();
+                }
+            }
+
             const href =
                 titleEl.attr('href') ||
-                c.find('a[href*="/jobs/"], a[href*="/job/"]').first().attr('href');
+                c.find('a[href*="/jobs/"]').first().attr('href') ||
+                c.find('a[href*="/job/"]').first().attr('href') ||
+                c.find('a[href*="/c/"]').first().attr('href');
 
             const jobUrl = normalizeUrl(href);
 
@@ -423,15 +514,23 @@ const extractJobsFromDom = (html, pageUrl) => {
         }
     }
 
-    // Fallback: generic h2/h3 scanning
+    // Fallback: generic h2/h3 scanning for job titles
     if (!jobs.length) {
+        log.debug('No cards found, trying h2/h3 fallback');
+        
         $('h2, h3').each((_, el) => {
-            const title = $(el).text().replace(/\s+/g, ' ').trim();
+            const $el = $(el);
+            const title = $el.text().replace(/\s+/g, ' ').trim();
             if (!title || title.length < 2 || title.length > 180) return;
+            
+            // Skip titles that look like section headers
+            if (title.toLowerCase().includes('similar jobs') || 
+                title.toLowerCase().includes('related') ||
+                title.toLowerCase().includes('search')) return;
 
-            const container = $(el).closest('article,div').length
-                ? $(el).closest('article,div')
-                : $(el).parent();
+            const container = $el.closest('article,li,div[class]').length
+                ? $el.closest('article,li,div[class]')
+                : $el.parent();
 
             let company =
                 container
@@ -440,27 +539,57 @@ const extractJobsFromDom = (html, pageUrl) => {
                     .text()
                     .replace(/\s+/g, ' ')
                     .trim() ||
-                container.find('.company, .company_name').first().text().replace(/\s+/g, ' ').trim();
+                container.find('.company, .company_name').first().text().replace(/\s+/g, ' ').trim() ||
+                container.find('a[href*="/co/"]').first().text().replace(/\s+/g, ' ').trim();
 
             const text = container.text().replace(/\s+/g, ' ').trim();
             let location = '';
             let salary = '';
 
-            const locMatch = text.match(/in\s+([^·|]+)/i);
+            // Look for location patterns
+            const locMatch = text.match(/(?:in|·)\s*([A-Za-z\s,]+(?:,\s*[A-Z]{2})?)/i);
             if (locMatch) location = locMatch[1].trim();
 
-            const salMatch = text.match(/\$\s?[\d,.]+[^·|]*/);
+            // Look for salary patterns (including CA$, $, etc.)
+            const salMatch = text.match(/(?:CA)?\$[\d,]+(?:\s*[-–]\s*(?:CA)?\$[\d,]+)?(?:\/(?:hr|hour|year|yr|month|mo|week|wk))?/i);
             if (salMatch) salary = salMatch[0].trim();
 
+            // Find job URL
             const href =
-                container.find('a[href*="/jobs/"], a[href*="/job/"]').first().attr('href') ||
-                $(el).find('a').first().attr('href');
+                container.find('a[href*="/jobs/"]').first().attr('href') ||
+                container.find('a[href*="/job/"]').first().attr('href') ||
+                container.find('a[href*="/c/"]').first().attr('href') ||
+                $el.find('a').first().attr('href') ||
+                $el.closest('a').attr('href');
 
             const jobUrl = normalizeUrl(href);
             pushJob(jobUrl, title, company, location, salary);
         });
     }
 
+    // Last resort: scan for any job-like links
+    if (!jobs.length) {
+        log.debug('No h2/h3 jobs found, trying link scanning');
+        
+        $('a[href*="/jobs/"], a[href*="/job/"], a[href*="/c/"]').each((_, el) => {
+            const $a = $(el);
+            const href = $a.attr('href');
+            
+            // Skip navigation links
+            if (href.includes('/jobs-search') || href.includes('/post-job')) return;
+            
+            const title = $a.text().replace(/\s+/g, ' ').trim();
+            if (!title || title.length < 3 || title.length > 160) return;
+            
+            // Skip if in header/footer/nav
+            if ($a.closest('header,footer,nav').length) return;
+            
+            const jobUrl = normalizeUrl(href);
+            pushJob(jobUrl, title, null, null, null);
+        });
+    }
+
+    log.debug('extractJobsFromDom result', { jobCount: jobs.length });
     return jobs;
 };
 
