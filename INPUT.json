@@ -1,15 +1,7 @@
 {
-  "keyword": "developer",
-  "location": "",
-  "postedWithin": "any",
+  "keyword": "software engineer",
+  "location": "san francisco",
   "results_wanted": 20,
-  "collect_details": true,
-  "maxConcurrency": 10,
-  "proxyConfiguration": {
-    "useApifyProxy": true,
-    "apifyProxyGroups": [
-      "RESIDENTIAL"
-    ],
-    "countryCode": "US"
-  }
+  "max_pages": 3,
+  "collectDetails": false
 }

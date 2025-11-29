@@ -9,9 +9,9 @@
           "title",
           "company",
           "location",
-          "salary_raw",
-          "employment_type",
-          "posted_text",
+          "salary",
+          "job_type",
+          "date_posted",
           "url"
         ]
       },
@@ -30,15 +30,15 @@
             "label": "Location",
             "format": "text"
           },
-          "salary_raw": {
+          "salary": {
             "label": "Salary",
             "format": "text"
           },
-          "employment_type": {
+          "job_type": {
             "label": "Job Type",
             "format": "text"
           },
-          "posted_text": {
+          "date_posted": {
             "label": "Posted",
             "format": "text"
           },

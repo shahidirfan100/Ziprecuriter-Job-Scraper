@@ -1,35 +1,31 @@
 {
-  "title": "ZipRecruiter Jobs Scraper (Fast & Optimized)",
-  "description": "A fast and lightweight actor to scrape job listings from ZipRecruiter using HTTP and Cheerio. Optimized for speed with parallel processing.",
+  "title": "ZipRecruiter Job Scraper",
+  "description": "Scrape jobs from ZipRecruiter.com. Provide either keyword/location OR a ZipRecruiter.com search URL (startUrl, url, or startUrls). Actor paginates and optionally scrapes detail pages.",
   "type": "object",
   "schemaVersion": 1,
   "properties": {
     "startUrl": {
-      "title": "Start URL (optional)",
+      "title": "Start URL",
       "type": "string",
-      "description": "A specific ZipRecruiter URL to start scraping from. If provided, it overrides Keyword, Location, and Date Posted filters.",
+      "description": "Start scraping from a specific ZipRecruiter.com search URL. If provided, this will be used instead of Keyword/Location.",
       "editor": "textfield"
     },
     "keyword": {
-      "title": "Keyword",
+      "title": "Keyword (if not using Start URL)",
       "type": "string",
-      "description": "Search term(s) for jobs (e.g., 'Software Developer', 'React', 'Data Analyst').",
-      "editor": "textfield",
-      "default": "developer",
-      "prefill": "developer"
+      "description": "Job search keyword(s), e.g., 'Software Engineer', 'Data Analyst', 'Manager'.",
+      "editor": "textfield"
     },
     "location": {
-      "title": "Location",
+      "title": "Location (if not using Start URL)",
       "type": "string",
-      "description": "Location to search for jobs (e.g. 'San Francisco, CA', 'New York'). Defaults to 'United States' to prevent geographic redirects.",
-      "default": "United States",
+      "description": "Location to search for jobs (e.g., 'San Francisco', 'New York', 'Remote'). Leave empty for all locations.",
       "editor": "textfield"
     },
     "postedWithin": {
-      "title": "Date Posted",
+      "title": "Jobs posted within",
       "type": "string",
-      "description": "Filter by how recently the job was posted. Note: This filter only works when using Keyword search (not with custom Start URL).",
-      "editor": "select",
+      "description": "Only keep jobs posted within this time window.",
       "enum": [
         "any",
         "24h",
@@ -44,61 +40,36 @@
       ],
       "default": "any"
     },
-    "results_wanted": {
-      "title": "Results Wanted",
-      "type": "integer",
-      "description": "The maximum number of job listings to scrape.",
-      "editor": "number",
-      "default": 100,
-      "prefill": 20,
-      "minimum": 1,
-      "maximum": 10000
-    },
-    "collect_details": {
-      "title": "Collect Job Details",
+    "collectDetails": {
+      "title": "Collect job details",
       "type": "boolean",
-      "description": "If enabled, the scraper will visit each job's detail page to extract more information (full description, etc.). Disabling this makes the scrape much faster but returns less data.",
+      "description": "If enabled, scraper opens job detail pages for full description and additional information.",
       "editor": "checkbox",
       "default": true
     },
-    "preferCandidateSearch": {
-      "title": "Prefer '/candidate/search' URLs",
-      "type": "boolean",
-      "description": "If enabled, the scraper will use the '/candidate/search' URL structure instead of '/Jobs/'. This can sometimes provide different results or better pagination stability.",
-      "editor": "checkbox",
-      "default": false
-    },
-    "maxConcurrency": {
-      "title": "Max Concurrency",
+    "results_wanted": {
+      "title": "Maximum number of jobs",
       "type": "integer",
-      "description": "The maximum number of parallel requests. Higher values = faster scraping but may increase blocking risk. Recommended: 8-15 for details, 15-25 without details.",
-      "editor": "number",
-      "default": 10,
+      "description": "The maximum number of jobs to collect. Leave empty to collect all available jobs.",
       "minimum": 1,
-      "maximum": 50
+      "default": 100,
+      "editor": "number"
     },
-    "downloadIntervalMs": {
-      "title": "Download Interval (ms)",
+    "max_pages": {
+      "title": "Maximum number of pages",
       "type": "integer",
-      "description": "Milliseconds to wait between requests. Lower values = faster but higher block risk. Default: 200ms with details, 100ms without.",
+      "description": "A safety cap on the number of search result pages to visit.",
+      "minimum": 1,
       "editor": "number",
-      "minimum": 0,
-      "maximum": 5000,
-      "nullable": true
+      "default": 20
     },
     "proxyConfiguration": {
-      "title": "Proxy Configuration",
+      "title": "Proxy configuration",
       "type": "object",
-      "description": "Select proxies to be used by the crawler. Residential proxies are highly recommended for ZipRecruiter.",
-      "editor": "proxy",
-      "prefill": {
-        "useApifyProxy": true,
-        "apifyProxyGroups": [
-          "RESIDENTIAL"
-        ],
-        "countryCode": "US"
-      }
+      "description": "Use Apify Proxy (datacenter recommended for ZipRecruiter.com).",
+      "editor": "proxy"
     }
   },
-  "required": []
+  "required": [],
+  "additionalProperties": true
 }

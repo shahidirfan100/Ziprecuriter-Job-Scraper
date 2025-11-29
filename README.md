@@ -1,78 +1,135 @@
-# ZipRecruiter Jobs Scraper
+# ZipRecruiter Job Scraper
 
-## Description
+Extract comprehensive job listings from ZipRecruiter.com - the leading global job search platform. This powerful scraper collects detailed employment data including job titles, companies, locations, salaries, and descriptions with intelligent pagination and error handling.
 
-This Apify actor provides a fast and robust solution for extracting job listings from ZipRecruiter. It supports keyword-based searches or starting from any ZipRecruiter jobs URL, ensuring resilience against blocking while retrieving detailed job information, including descriptions, salaries, and application details.
+## Features
 
-## Key Features
+- **Comprehensive Job Data**: Extracts job titles, companies, locations, salaries, posting dates, and full descriptions
+- **Flexible Search Options**: Search by keywords, locations, or specific ZipRecruiter URLs
+- **Smart Pagination**: Automatically handles multi-page results with configurable limits
+- **Detailed Job Information**: Optionally fetches complete job descriptions and additional metadata
+- **Reliable Data Collection**: Built for production use with robust error handling and retry mechanisms
+- **Customizable Results**: Control the number of jobs and pages to scrape
+- **SEO Optimized**: Designed for maximum discoverability on job search platforms
 
-- **Comprehensive Data Extraction**: Captures all essential job details, such as:
-  - Full job description (HTML and plain text formats).
-  - Salary range (minimum, maximum, and period).
-  - Company name, location, date posted, and employment type.
-  - Direct apply flag and structured JSON-LD data.
+## Use Cases
 
-- **Flexible Starting Options**:
-  - Perform searches using keywords and locations.
-  - Start from a specific ZipRecruiter URL for targeted scraping.
+### For Job Seekers
+Find relevant job opportunities across industries and locations. Stay updated with new positions matching your skills and career goals.
 
-- **Robust Pagination and Deduplication**:
-  - Navigates all pages to reach the desired number of results.
-  - Handles various URL structures for compatibility.
-  - Prevents duplicate entries.
+### For Recruiters and Agencies
+Monitor job market trends, track competitor hiring patterns, and identify talent pools in specific sectors.
 
-- **Scraping Modes**:
-  - **Full Detail Mode**: Visits each job page for complete data (default).
-  - **Fast List Mode**: Extracts data from search results only for speed.
+### For Market Researchers
+Analyze salary trends, job posting frequencies, and demand for various roles across different regions.
 
-- **Anti-Blocking Measures**:
-  - Rotates user agents and manages sessions.
-  - Supports residential proxies.
-  - Configurable request intervals for politeness.
+### For Businesses
+Track industry hiring patterns and benchmark recruitment strategies against market standards.
 
-## Input
+## Input Configuration
 
-Configure the actor with the following fields:
+Configure your job search with these flexible input options:
 
-| Field | Type | Description |
-|---|---|---|
-| `startUrl` | `string` | Optional. A specific ZipRecruiter URL to begin scraping from. Overrides `keyword` and `location`. |
-| `keyword` | `string` | Optional. Job title, skill, or keyword for search (e.g., "Software Engineer"). |
-| `location` | `string` | Optional. City, state, or region (e.g., "New York, NY" or "Remote"). |
-| `results_wanted` | `integer` | Required. Total unique jobs to scrape. |
-| `collect_details` | `boolean` | Optional. Set to `true` for full details (default); `false` for fast mode. |
-| `preferCandidateSearch` | `boolean` | Optional. Use alternative URL structure for stability. |
-| `maxConcurrency` | `integer` | Optional. Number of parallel requests (1-3 recommended). |
-| `downloadIntervalMs` | `integer` | Optional. Delay between requests in milliseconds. |
-| `proxyConfiguration` | `object` | Optional. Proxy settings (residential proxies advised). |
+### Basic Search Parameters
 
-## Output
+| Field | Type | Description | Example |
+|-------|------|-------------|---------|
+| `keyword` | string | Job title, role, or skill keywords | `"Software Engineer"`, `"Data Analyst"`, `"Project Manager"` |
+| `location` | string | City, region, or "Remote" | `"San Francisco"`, `"New York"`, `"Remote"` |
+| `startUrl` | string | Direct ZipRecruiter search URL (overrides basic search) | `"https://www.ziprecruiter.com/jobs-search?search=engineer&location=san-francisco"` |
 
-The actor outputs job data in JSON format, with each item containing fields like `title`, `company`, `location`, `description`, `salary`, and more. Results are deduplicated and paginated.
+### Advanced Options
 
-## Usage
+| Field | Type | Description | Default |
+|-------|------|-------------|---------|
+| `results_wanted` | number | Maximum jobs to collect (1-1000) | `100` |
+| `max_pages` | number | Maximum search pages to process | `20` |
+| `collectDetails` | boolean | Scrape full job descriptions from detail pages | `true` |
+| `proxyConfiguration` | object | Apify Proxy settings for reliable scraping | - |
 
-1. **Basic Search**: Provide `keyword` and `location` to start a new search.
-2. **Custom URL**: Use `startUrl` for specific pages.
-3. **Mode Selection**: Enable `collect_details` for in-depth data or disable for quick lists.
-4. **Run the Actor**: Input your configuration and execute on Apify.
+## Output Data Structure
 
-### Configuration Tips
+Each job listing is saved as a structured JSON object:
 
-- For large result sets, increase `downloadIntervalMs` to avoid rate limits.
-- Use residential proxies in `proxyConfiguration` to bypass blocks.
-- Set `maxConcurrency` low for stability.
+```json
+{
+  "title": "Senior Software Engineer",
+  "company": "Tech Innovations Inc.",
+  "location": "San Francisco, CA",
+  "salary": "$120,000 - $150,000 per year",
+  "job_type": "Full-time",
+  "date_posted": "2024-01-15",
+  "description_html": "<p>Join our innovative team...</p>",
+  "description_text": "Join our innovative team...",
+  "url": "https://www.ziprecruiter.com/job/senior-software-engineer/job12345",
+  "keyword_search": "software engineer",
+  "location_search": "san francisco",
+  "extracted_at": "2024-01-15T10:30:00.000Z"
+}
+```
 
-## Examples
+### Field Descriptions
 
-### Example 1: Keyword Search for Remote Data Analyst Jobs
+- **`title`**: Job position title
+- **`company`**: Hiring organization name
+- **`location`**: Job location (city, region, or remote)
+- **`salary`**: Salary information when available
+- **`job_type`**: Employment type (Full-time, Part-time, Contract, etc.)
+- **`date_posted`**: Job posting date (YYYY-MM-DD format)
+- **`description_html`**: Full job description with HTML formatting
+- **`description_text`**: Plain text job description
+- **`url`**: Direct link to the job posting on ZipRecruiter
+- **`keyword_search`**: The keyword used for the search
+- **`location_search`**: The location used for the search
+- **`extracted_at`**: Timestamp when the data was extracted
+
+## Usage Examples
+
+### Example 1: Search for Software Engineer Jobs in San Francisco
+
+```json
+{
+  "keyword": "Software Engineer",
+  "location": "San Francisco",
+  "results_wanted": 50,
+  "collectDetails": true
+}
+```
+
+*Collects up to 50 software engineer positions in San Francisco with full descriptions.*
+
+### Example 2: Data Analyst Positions in New York
 
 ```json
 {
   "keyword": "Data Analyst",
-  "location": "Remote",
-  "results_wanted": 150,
-  "collect_details": true,
+  "location": "New York",
+  "results_wanted": 25,
+  "max_pages": 5
+}
+```
+
+*Finds data analyst jobs in New York, limiting to 25 results and 5 pages.*
+
+### Example 3: Custom Search URL
+
+```json
+{
+  "startUrl": "https://www.ziprecruiter.com/jobs-search?search=project+manager&location=remote",
+  "collectDetails": false,
+  "results_wanted": 100
+}
+```
+
+*Uses a specific ZipRecruiter search URL for remote project manager positions.*
+
+## Configuration Options
+
+### Proxy Settings
+For optimal performance and reliability, configure Apify Proxy with residential IPs:
+
+```json
+{
   "proxyConfiguration": {
     "useApifyProxy": true,
     "apifyProxyGroups": ["RESIDENTIAL"]
@@ -80,23 +137,24 @@ The actor outputs job data in JSON format, with each item containing fields like
 }
 ```
 
-### Example 2: Fast Mode from a Specific URL
+### Result Limits
+Control the scope of your scraping:
 
-```json
-{
-  "startUrl": "https://www.ziprecruiter.com/jobs-search?search=engineer&location=San+Francisco%2C+CA",
-  "results_wanted": 50,
-  "collect_details": false,
-  "maxConcurrency": 2,
-  "downloadIntervalMs": 1000
-}
-```
+- `results_wanted`: Maximum number of job listings to collect
+- `max_pages`: Safety limit on search result pages to process
+- `collectDetails`: Whether to fetch full job descriptions (increases processing time)
 
-## Limitations
+## Limits and Considerations
 
-- Results depend on ZipRecruiter's availability and changes.
-- High concurrency may trigger blocks; adjust settings accordingly.
+- **Rate Limiting**: Respects ZipRecruiter.com's servers with adaptive delays
+- **Data Freshness**: Job listings are extracted in real-time from the current search results
+- **Geographic Coverage**: Supports global job searches with location filtering
+- **Data Accuracy**: Extracts data as displayed on ZipRecruiter.com at the time of scraping
 
-## Support
+## Data Source
 
-For issues or questions, refer to Apify's documentation or community forums.
+**ZipRecruiter.com** - One of the largest job search platforms globally, connecting millions of job seekers with employers across all industries and locations.
+
+## Keywords
+
+job scraper, ZipRecruiter, job listings, employment data, job search, career opportunities, recruitment data, salary information, job market analysis, hiring trends
