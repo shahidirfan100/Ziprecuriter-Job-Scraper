@@ -1,4 +1,4 @@
-// src/main.js
+// main.js
 import { Actor, log } from 'apify';
 import { Dataset } from 'crawlee';
 import { chromium } from 'playwright';
@@ -144,11 +144,30 @@ const doPlaywrightHandshake = async (url) => {
             return route.continue();
         });
 
-        await page.goto(url, { waitUntil: 'networkidle', timeout: 45000 }).catch((err) => {
+        await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 45000 }).catch((err) => {
             log.warning('Handshake goto() issue', { message: err.message ?? String(err) });
         });
 
         await dismissPopupsPlaywright(page);
+
+        // Wait explicitly for something that looks like job results
+        try {
+            await page.waitForSelector(
+                [
+                    'article[data-job-id]',
+                    'div[data-job-id]',
+                    '[data-testid="job-card"]',
+                    '.job_result',
+                    '.job_result_card',
+                    'section[role="list"] article',
+                    'a[href*="/jobs/"]',
+                ].join(','),
+                { timeout: 15000 },
+            );
+        } catch {
+            // If this fails, we'll still grab HTML and try DOM parsing.
+            log.debug('Handshake: job selector not found before timeout');
+        }
 
         // small human-ish activity
         await page.waitForTimeout(1000 + Math.round(Math.random() * 1000));
@@ -239,7 +258,7 @@ const normalizeUrl = (href) => {
 
 /**
  * DOM-based listing parser for ZipRecruiter.
- * We try specific card selectors, then fallback to generic h2-based parsing.
+ * We try specific card selectors, then fallback to generic h2/h3-based parsing.
  */
 const extractJobsFromDom = (html, pageUrl) => {
     const $ = cheerio.load(html);
@@ -255,6 +274,7 @@ const extractJobsFromDom = (html, pageUrl) => {
         '[data-testid="job-card"]',
         '.job_result',
         '.job_result_card',
+        'section[role="list"] article',
     ];
 
     let cards = [];
@@ -292,13 +312,13 @@ const extractJobsFromDom = (html, pageUrl) => {
             const titleEl =
                 c.find('a[data-testid="job-title"]').first() ||
                 c.find('a[href*="/jobs/"]').first() ||
-                c.find('h2 a, h2').first();
+                c.find('h2 a, h2, h3 a, h3').first();
 
             const title = titleEl.text().replace(/\s+/g, ' ').trim();
 
             let company =
                 c.find('[data-testid="company-name"]').first().text().replace(/\s+/g, ' ').trim() ||
-                c.find('.job_result_company, .company_name').first().text().replace(/\s+/g, ' ').trim();
+                c.find('.job_result_company, .company_name, .company').first().text().replace(/\s+/g, ' ').trim();
 
             let location =
                 c.find('[data-testid="location"]').first().text().replace(/\s+/g, ' ').trim() ||
@@ -318,9 +338,9 @@ const extractJobsFromDom = (html, pageUrl) => {
         }
     }
 
-    // Fallback: generic h2 scanning
+    // Fallback: generic h2/h3 scanning
     if (!jobs.length) {
-        $('h2').each((_, el) => {
+        $('h2, h3').each((_, el) => {
             const title = $(el).text().replace(/\s+/g, ' ').trim();
             if (!title || title.length < 2 || title.length > 180) return;
 
@@ -608,6 +628,12 @@ Actor.main(async () => {
         stats.jobsFromDomFallback += jobs.length;
 
         if (!jobs.length) {
+            // Extra debug only on first page to avoid huge logs
+            if (pageNum === 1) {
+                const snippet = html.slice(0, 1000).replace(/\s+/g, ' ');
+                log.debug('First page HTML snippet (no jobs parsed):', { snippet });
+            }
+
             log.warning('No jobs parsed from listing page; stopping pagination.', {
                 url: listingUrl,
                 pageNum,
