@@ -348,6 +348,7 @@ const doPlaywrightHandshake = async (url, proxyConfiguration, sessionId) => {
 
         browser = await chromium.launch({
             headless: true,
+            timeout: 30000,
             proxy: proxyUrl ? { server: proxyUrl } : undefined,
             args: [
                 '--disable-blink-features=AutomationControlled',
@@ -371,6 +372,8 @@ const doPlaywrightHandshake = async (url, proxyConfiguration, sessionId) => {
             bypassCSP: true,
             proxy: proxyUrl ? { server: proxyUrl } : undefined,
         });
+        context.setDefaultTimeout(15000);
+        context.setDefaultNavigationTimeout(45000);
 
         // Enhanced navigator hardening to bypass Cloudflare
         await context.addInitScript(() => {
@@ -453,23 +456,24 @@ const doPlaywrightHandshake = async (url, proxyConfiguration, sessionId) => {
             return route.continue();
         });
 
-        // Navigate and wait for network to settle (important for Cloudflare)
-        await page.goto(url, { waitUntil: 'networkidle', timeout: 60000 }).catch((err) => {
+        // Navigate quickly; networkidle can hang on sites with long-polling.
+        await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 45000 }).catch((err) => {
             log.warning('Handshake goto() issue', { message: err.message ?? String(err) });
         });
+        await page.waitForLoadState('networkidle', { timeout: 12000 }).catch(() => {});
 
         // Check if we're on Cloudflare challenge page and wait for it to resolve
         let attempts = 0;
-        const maxAttempts = 10;
+        const maxAttempts = 5;
         while (attempts < maxAttempts) {
             const pageTitle = await page.title();
-            const pageContent = await page.content();
+            const pageContent = await page.content().catch(() => '');
             
             if (pageTitle.toLowerCase().includes('just a moment') || 
                 pageContent.toLowerCase().includes('checking your browser') ||
                 pageContent.toLowerCase().includes('cf-browser-verification')) {
                 log.info('Cloudflare challenge detected, waiting...', { attempt: attempts + 1 });
-                await page.waitForTimeout(3000);
+                await page.waitForTimeout(1500 + Math.floor(Math.random() * 800));
                 attempts++;
             } else {
                 break;
@@ -645,7 +649,8 @@ const playwrightFetchPageHtml = async ({ url, userAgent, proxyUrl, storageState 
             return route.continue();
         });
 
-        await page.goto(url, { waitUntil: 'networkidle', timeout: 45000 });
+        await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 45000 });
+        await page.waitForLoadState('networkidle', { timeout: 8000 }).catch(() => {});
         await dismissPopupsPlaywright(page);
         await handleOptInFlow(page);
 
@@ -1140,6 +1145,9 @@ Actor.main(async () => {
         keyword = '',
         location = '',
         startUrl = '',
+        // Backwards-compatible inputs (older UI schema)
+        collectDetails = undefined,
+        postedWithin = 'any',
         results_wanted = DEFAULT_RESULTS_WANTED,
         max_pages = DEFAULT_MAX_PAGES,
         max_detail_concurrency = DEFAULT_MAX_DETAIL_CONCURRENCY,
@@ -1147,10 +1155,15 @@ Actor.main(async () => {
         detail_playwright_fallback = false,
         listing_fetch_retries = 2,
         detail_fetch_retries = 2,
+        handshake_mode = 'auto', // 'auto' | 'always' | 'never'
         proxyConfiguration: proxyFromInput,
     } = input;
 
-    const detailMode = ['none', 'basic', 'full'].includes(detail_mode) ? detail_mode : 'full';
+    let detailModeCandidate = detail_mode;
+    if (input.detail_mode == null && typeof collectDetails === 'boolean') {
+        detailModeCandidate = collectDetails ? 'full' : 'none';
+    }
+    const detailMode = ['none', 'basic', 'full'].includes(detailModeCandidate) ? detailModeCandidate : 'full';
     const resultsWanted = Math.max(1, Number(results_wanted) || DEFAULT_RESULTS_WANTED);
     const pagesLimit = Math.max(1, Math.min(Number(max_pages) || DEFAULT_MAX_PAGES, 50));
     const detailConcurrency = Math.max(
@@ -1167,6 +1180,7 @@ Actor.main(async () => {
         keyword,
         location,
         startUrl: startUrlClean || null,
+        postedWithin: postedWithin || 'any',
         resultsWanted,
         pagesLimit,
         detailMode,
@@ -1183,6 +1197,7 @@ Actor.main(async () => {
         listingEmbeddedJsonHits: 0,
         listingDomHits: 0,
         jobsFromDomFallback: 0,
+        filteredOutByPostedWithin: 0,
         jobsSaved: 0,
         detailRequests: 0,
         detailSuccess: 0,
@@ -1204,6 +1219,8 @@ Actor.main(async () => {
         detail_playwright_fallback,
         listing_fetch_retries,
         detail_fetch_retries,
+        handshake_mode,
+        postedWithin,
     });
 
     // Proxy config (for HTTP scraping only)
@@ -1220,26 +1237,59 @@ Actor.main(async () => {
         proxyConfiguration ? proxyConfiguration.newUrl(session) : undefined;
 
     const handshakeUrl = startUrlToUse;
-    stats.handshakeAttempted = true;
     let handshakeHtml = '';
     let handshakeCookieHeader = '';
     let handshakeUserAgent = randomFingerprint().ua;
     let handshakeInitialJobs = [];
+    let handshakeJsonSources = [];
+    let handshakeStorageState = null;
 
-    const handshakeResult = await doPlaywrightHandshake(handshakeUrl, proxyConfiguration, sessionId);
-    handshakeHtml = handshakeResult.html || '';
-    handshakeCookieHeader = handshakeResult.cookieHeader || '';
-    handshakeUserAgent = handshakeResult.userAgent || handshakeUserAgent;
-    handshakeInitialJobs = handshakeResult.initialJobs || [];
-    const handshakeJsonSources = handshakeResult.jsonApiSources || [];
-    const handshakeStorageState = handshakeResult.storageState || null;
-    stats.handshakeSucceeded = Boolean(handshakeHtml && handshakeCookieHeader);
-    stats.handshakeInitialJobs = handshakeInitialJobs.length;
-    stats.handshakeJsonSources = (handshakeResult.jsonApiSources || []).length;
+    const handshakeMode = ['auto', 'always', 'never'].includes(handshake_mode)
+        ? handshake_mode
+        : 'auto';
 
-    if (!stats.handshakeSucceeded) {
-        log.warning('Continuing with HTTP-only mode (handshake did not fully succeed)');
+    const ensureHandshake = async () => {
+        if (stats.handshakeAttempted) return;
+        stats.handshakeAttempted = true;
+
+        const handshakeResult = await doPlaywrightHandshake(handshakeUrl, proxyConfiguration, sessionId);
+        handshakeHtml = handshakeResult.html || '';
+        handshakeCookieHeader = handshakeResult.cookieHeader || '';
+        handshakeUserAgent = handshakeResult.userAgent || handshakeUserAgent;
+        handshakeInitialJobs = handshakeResult.initialJobs || [];
+        handshakeJsonSources = handshakeResult.jsonApiSources || [];
+        handshakeStorageState = handshakeResult.storageState || null;
+
+        stats.handshakeSucceeded = Boolean(handshakeHtml && handshakeCookieHeader);
+        stats.handshakeInitialJobs = handshakeInitialJobs.length;
+        stats.handshakeJsonSources = handshakeJsonSources.length;
+
+        if (!stats.handshakeSucceeded) {
+            log.warning('Handshake did not fully succeed; continuing with HTTP-only fallbacks');
+        }
+    };
+
+    if (handshakeMode === 'always') {
+        await ensureHandshake();
     }
+
+    const postedWithinNormalized = ['any', '24h', '7d', '30d'].includes(String(postedWithin))
+        ? String(postedWithin)
+        : 'any';
+    const postedWithinCutoffMs = (() => {
+        const now = Date.now();
+        if (postedWithinNormalized === '24h') return now - 24 * 60 * 60 * 1000;
+        if (postedWithinNormalized === '7d') return now - 7 * 24 * 60 * 60 * 1000;
+        if (postedWithinNormalized === '30d') return now - 30 * 24 * 60 * 60 * 1000;
+        return null;
+    })();
+    const passesPostedWithinFilter = (job) => {
+        if (!postedWithinCutoffMs) return true;
+        if (!job?.date_posted) return true; // keep unknown dates to avoid dropping most results
+        const ts = Date.parse(job.date_posted);
+        if (Number.isNaN(ts)) return true;
+        return ts >= postedWithinCutoffMs;
+    };
 
     const deriveJsonUrlForPage = (pageNum) => {
         for (const src of handshakeJsonSources) {
@@ -1275,6 +1325,32 @@ Actor.main(async () => {
         return null;
     };
 
+    const fetchListingHtmlWithRotation = async (url, pageNum) => {
+        const attempts = 2; // keep it cheap; rotate session/IP once on blocks
+        let lastErr;
+        for (let i = 0; i < attempts; i++) {
+            const proxyUrl = await getProxyUrl(
+                `${sessionId}_list_${pageNum}_${i}_${Math.floor(Math.random() * 1000)}`,
+            );
+            try {
+                return await httpFetchHtml({
+                    url,
+                    userAgent: handshakeUserAgent,
+                    cookieHeader: handshakeCookieHeader,
+                    proxyUrl,
+                    retries: listing_fetch_retries,
+                });
+            } catch (err) {
+                lastErr = err;
+                const msg = err.message ?? String(err);
+                const looksLikeBlock =
+                    msg.includes('Blocked on HTTP') || msg.includes('HTTP 403') || msg.includes('HTTP 429');
+                if (!looksLikeBlock) throw err;
+            }
+        }
+        throw lastErr;
+    };
+
     let savedCount = 0;
 
     for (let pageNum = 1; pageNum <= pagesLimit; pageNum++) {
@@ -1289,10 +1365,49 @@ Actor.main(async () => {
         let listingSource = 'unknown';
 
         try {
-            const jsonResult = await fetchListingViaJson(pageNum);
-            if (jsonResult?.jobs?.length) {
-                jobs = jsonResult.jobs;
-                listingSource = 'json-api';
+            // Fast/cheap path (auto mode): try plain HTTP on page 1 before launching Playwright.
+            if (pageNum === 1 && handshakeMode === 'auto' && !stats.handshakeAttempted) {
+                try {
+                    const preflightHtml = await fetchListingHtmlWithRotation(listingUrl, pageNum);
+
+                    const embeddedJobs = extractJobsFromEmbeddedJson(preflightHtml, listingUrl);
+                    if (embeddedJobs.length) {
+                        html = preflightHtml;
+                        jobs = embeddedJobs;
+                        listingSource = 'embedded-json';
+                        stats.listingEmbeddedJsonHits += jobs.length;
+                    } else {
+                        const domJobs = extractJobsFromDom(preflightHtml, listingUrl);
+                        if (domJobs.length) {
+                            html = preflightHtml;
+                            jobs = domJobs;
+                            listingSource = 'dom';
+                            stats.listingDomHits += jobs.length;
+                        }
+                    }
+
+                } catch (preErr) {
+                    const msg = preErr.message ?? String(preErr);
+                    if (msg.includes('Blocked on HTTP')) {
+                        stats.pagesBlockedOrCaptcha++;
+                    }
+                    log.debug('Preflight listing fetch failed', {
+                        error: msg,
+                    });
+                }
+
+                // Only if we still have no jobs, do the expensive Playwright handshake once.
+                if (!jobs.length && handshakeMode !== 'never') {
+                    await ensureHandshake();
+                }
+            }
+
+            if (!jobs.length) {
+                const jsonResult = await fetchListingViaJson(pageNum);
+                if (jsonResult?.jobs?.length) {
+                    jobs = jsonResult.jobs;
+                    listingSource = 'json-api';
+                }
             }
 
             // PAGE 1: Prefer jobs extracted directly from Playwright DOM/JSON if we have them
@@ -1312,16 +1427,7 @@ Actor.main(async () => {
                     listingSource = listingSource === 'unknown' ? 'handshake-html' : listingSource;
                     log.info('Using HTML from Playwright handshake for page 1 (parse flow)');
                 } else {
-                    const proxyUrl = await getProxyUrl(
-                        `${sessionId}_list_${pageNum}_${Math.floor(Math.random() * 10)}`,
-                    );
-                    html = await httpFetchHtml({
-                        url: listingUrl,
-                        userAgent: handshakeUserAgent,
-                        cookieHeader: handshakeCookieHeader,
-                        proxyUrl,
-                        retries: listing_fetch_retries,
-                    });
+                    html = await fetchListingHtmlWithRotation(listingUrl, pageNum);
                 }
 
                 if (looksBlockedHtml(html)) {
@@ -1526,7 +1632,10 @@ Actor.main(async () => {
         );
 
         // Save jobs
-        for (const finalJob of enrichedJobs) {
+        const filteredJobs = enrichedJobs.filter((job) => passesPostedWithinFilter(job));
+        stats.filteredOutByPostedWithin += Math.max(0, enrichedJobs.length - filteredJobs.length);
+
+        for (const finalJob of filteredJobs) {
             if (savedCount >= resultsWanted) break;
             await Dataset.pushData(finalJob);
             savedCount++;

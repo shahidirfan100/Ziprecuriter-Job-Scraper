@@ -43,16 +43,48 @@
     "collectDetails": {
       "title": "Collect job details",
       "type": "boolean",
-      "description": "If enabled, scraper opens job detail pages for full description and additional information.",
+      "description": "Legacy toggle (kept for backwards compatibility). Prefer `detail_mode` for finer control.",
       "editor": "checkbox",
       "default": true
+    },
+    "detail_mode": {
+      "title": "Detail mode",
+      "type": "string",
+      "description": "Controls how many job detail pages are fetched. `basic` fetches only a few per page for speed/cost savings.",
+      "enum": [
+        "none",
+        "basic",
+        "full"
+      ],
+      "enumTitles": [
+        "None (fastest/cheapest)",
+        "Basic (first few per page)",
+        "Full (all jobs)"
+      ],
+      "default": "full"
+    },
+    "max_detail_concurrency": {
+      "title": "Max detail concurrency",
+      "type": "integer",
+      "description": "Maximum parallel detail requests (1-8). Higher is faster but increases blocking risk and proxy cost.",
+      "minimum": 1,
+      "maximum": 8,
+      "default": 3,
+      "editor": "number"
+    },
+    "detail_playwright_fallback": {
+      "title": "Playwright fallback for details",
+      "type": "boolean",
+      "description": "If enabled, uses a stealth Playwright page as a fallback for detail pages blocked over HTTP (slower/more expensive).",
+      "editor": "checkbox",
+      "default": false
     },
     "results_wanted": {
       "title": "Maximum number of jobs",
       "type": "integer",
       "description": "The maximum number of jobs to collect. Leave empty to collect all available jobs.",
       "minimum": 1,
-      "default": 100,
+      "default": 20,
       "editor": "number"
     },
     "max_pages": {
@@ -61,12 +93,46 @@
       "description": "A safety cap on the number of search result pages to visit.",
       "minimum": 1,
       "editor": "number",
-      "default": 20
+      "default": 5
+    },
+    "listing_fetch_retries": {
+      "title": "Listing fetch retries",
+      "type": "integer",
+      "description": "Number of retries (with backoff) for listing requests.",
+      "minimum": 1,
+      "maximum": 5,
+      "default": 2,
+      "editor": "number"
+    },
+    "detail_fetch_retries": {
+      "title": "Detail fetch retries",
+      "type": "integer",
+      "description": "Number of retries (with backoff) for detail requests.",
+      "minimum": 1,
+      "maximum": 5,
+      "default": 2,
+      "editor": "number"
+    },
+    "handshake_mode": {
+      "title": "Playwright handshake mode",
+      "type": "string",
+      "description": "Controls whether the actor launches Playwright for a 1-page handshake. Use `auto` to avoid browser startup unless blocked/empty.",
+      "enum": [
+        "auto",
+        "always",
+        "never"
+      ],
+      "enumTitles": [
+        "Auto (recommended)",
+        "Always",
+        "Never"
+      ],
+      "default": "auto"
     },
     "proxyConfiguration": {
       "title": "Proxy configuration",
       "type": "object",
-      "description": "Use Apify Proxy (datacenter recommended for ZipRecruiter.com).",
+      "description": "Use Apify Proxy (RESIDENTIAL recommended for ZipRecruiter.com).",
       "editor": "proxy"
     }
   },

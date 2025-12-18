@@ -40,6 +40,7 @@ Configure your job search with these flexible input options:
 | `max_detail_concurrency` | number | Parallel detail fetches (1-8) | `3` |
 | `listing_fetch_retries` | number | Retries with backoff for listing fetch | `2` |
 | `detail_fetch_retries` | number | Retries with backoff for detail fetch | `2` |
+| `handshake_mode` | enum | `auto` (only if blocked/empty), `always`, `never` | `auto` |
 | `detail_playwright_fallback` | boolean | Use stealth Playwright when detail HTML is blocked | `false` |
 | `proxyConfiguration` | object | Apify Proxy settings (RESIDENTIAL recommended) | `{ useApifyProxy: true, groups: ["RESIDENTIAL"], countryCode: "GB" }` |
 
