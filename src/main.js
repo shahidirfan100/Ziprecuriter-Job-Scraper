@@ -1215,7 +1215,7 @@ Actor.main(async () => {
         },
     );
 
-    const sessionId = `sess-${Date.now()}-${Math.floor(Math.random() * 100000)}`;
+    const sessionId = `sess_${Date.now()}_${Math.floor(Math.random() * 100000)}`;
     const getProxyUrl = async (session = sessionId) =>
         proxyConfiguration ? proxyConfiguration.newUrl(session) : undefined;
 
@@ -1254,7 +1254,7 @@ Actor.main(async () => {
         const jsonUrl = deriveJsonUrlForPage(pageNum);
         if (!jsonUrl) return null;
         try {
-            const proxyUrl = await getProxyUrl(`${sessionId}-json-${pageNum}`);
+            const proxyUrl = await getProxyUrl(`${sessionId}_json_${pageNum}`);
             const json = await httpFetchJson({
                 url: jsonUrl,
                 userAgent: handshakeUserAgent,
@@ -1313,7 +1313,7 @@ Actor.main(async () => {
                     log.info('Using HTML from Playwright handshake for page 1 (parse flow)');
                 } else {
                     const proxyUrl = await getProxyUrl(
-                        `${sessionId}-list-${pageNum}-${Math.floor(Math.random() * 10)}`,
+                        `${sessionId}_list_${pageNum}_${Math.floor(Math.random() * 10)}`,
                     );
                     html = await httpFetchHtml({
                         url: listingUrl,
@@ -1432,7 +1432,7 @@ Actor.main(async () => {
                 stats.detailRequests++;
                 try {
                     const proxyUrlForDetails = await getProxyUrl(
-                        `${sessionId}-detail-${index % Math.max(1, detailConcurrency)}`,
+                        `${sessionId}_detail_${index % Math.max(1, detailConcurrency)}`,
                     );
                     const htmlDetail = await httpFetchHtml({
                         url: baseJob.url,
@@ -1477,7 +1477,7 @@ Actor.main(async () => {
                         stats.detailPlaywrightAttempts++;
                         try {
                             const proxyUrlForPw = await getProxyUrl(
-                                `${sessionId}-detail-pw-${index % Math.max(2, detailConcurrency)}`,
+                                `${sessionId}_detail_pw_${index % Math.max(2, detailConcurrency)}`,
                             );
                             const pwHtml = await playwrightFetchPageHtml({
                                 url: baseJob.url,
