@@ -1,10 +1,9 @@
 // main.js
 import { Actor, log } from 'apify';
-import { Dataset, playwright } from 'crawlee';
+import { Dataset } from 'crawlee';
+import { chromium } from 'playwright';
 import { gotScraping } from 'got-scraping';
 import * as cheerio from 'cheerio';
-
-const { chromium } = playwright;
 
 const BASE_URL = 'https://www.ziprecruiter.com';
 const DEFAULT_RESULTS_WANTED = 20;
