@@ -1,9 +1,10 @@
 // main.js
 import { Actor, log } from 'apify';
-import { Dataset } from 'crawlee';
-import { chromium } from 'playwright';
+import { Dataset, playwright } from 'crawlee';
 import { gotScraping } from 'got-scraping';
 import * as cheerio from 'cheerio';
+
+const { chromium } = playwright;
 
 const BASE_URL = 'https://www.ziprecruiter.com';
 const DEFAULT_RESULTS_WANTED = 20;
@@ -35,6 +36,28 @@ const buildPageUrlFromStart = (startUrl, page) => {
     const url = new URL(startUrl);
     url.searchParams.set('page', String(page));
     return url.href;
+};
+
+const buildJsonPageUrlFromSource = (sourceUrl, page) => {
+    try {
+        const url = new URL(sourceUrl);
+        const pageKeys = ['page', 'pageNum', 'page_number', 'pageNumber', 'pn', 'p'];
+        let foundKey = null;
+        for (const key of pageKeys) {
+            if (url.searchParams.has(key)) {
+                foundKey = key;
+                break;
+            }
+        }
+        if (!foundKey) {
+            // If no page param exists, add standard page
+            foundKey = 'page';
+        }
+        url.searchParams.set(foundKey, String(page));
+        return url.href;
+    } catch {
+        return null;
+    }
 };
 
 // --- FINGERPRINT & STEALTH ----------------------------------------------------
@@ -73,6 +96,172 @@ const looksBlockedHtml = (html = '') => {
         'challenge-running',
     ];
     return markers.some((m) => lower.includes(m));
+};
+
+const retryWithBackoff = async (fn, { attempts = 3, startMs = 600, factor = 1.6 } = {}) => {
+    let lastErr;
+    for (let i = 0; i < attempts; i++) {
+        try {
+            return await fn();
+        } catch (err) {
+            lastErr = err;
+            if (i === attempts - 1) break;
+            const wait = Math.round(startMs * Math.pow(factor, i) * (1 + Math.random() * 0.3));
+            await Actor.sleep(wait);
+        }
+    }
+    throw lastErr;
+};
+
+const normalizeUrl = (href) => {
+    if (!href) return null;
+    try {
+        return new URL(href, BASE_URL).href;
+    } catch {
+        return null;
+    }
+};
+
+const safeParseJson = (text) => {
+    try {
+        return JSON.parse(text);
+    } catch {
+        return null;
+    }
+};
+
+const extractJobsFromJsonPayload = (payload, pageUrl) => {
+    if (!payload) return [];
+    const jobs = [];
+    const seen = new Set();
+    const pushJob = (jobUrl, title, company, location, salary, datePosted) => {
+        const normalized = normalizeUrl(jobUrl);
+        if (!normalized || seen.has(normalized)) return;
+        if (!title || title.length < 2 || title.length > 200) return;
+
+        jobs.push({
+            source: 'ziprecruiter',
+            listing_page_url: pageUrl,
+            title,
+            company: company || null,
+            location: location || null,
+            salary: salary || null,
+            date_posted: datePosted || null,
+            url: normalized,
+        });
+        seen.add(normalized);
+    };
+
+    const walk = (node) => {
+        if (!node) return;
+        if (Array.isArray(node)) {
+            // If array looks like jobs, try to extract directly
+            if (node.length && node.every((item) => typeof item === 'object')) {
+                for (const item of node) {
+                    const title = item.title || item.job_title || item.name || item.position;
+                    const company =
+                        item.company ||
+                        item.company_name ||
+                        item.employer ||
+                        item.hiringOrganization?.name;
+                    const location =
+                        item.location ||
+                        item.city ||
+                        item.region ||
+                        item.jobLocation?.address?.addressLocality ||
+                        item.jobLocation?.address?.addressRegion;
+                    const salary =
+                        item.salary ||
+                        item.compensation ||
+                        item.pay ||
+                        item.estimated_salary ||
+                        item.salary_range;
+                    const datePosted = item.date_posted || item.datePosted || item.posted_at;
+                    const url =
+                        item.url ||
+                        item.job_url ||
+                        item.jobUrl ||
+                        item.href ||
+                        item.absolute_url ||
+                        item.detailUrl;
+
+                    if (url && title) {
+                        pushJob(url, String(title), company ? String(company) : null, location ? String(location) : null, salary ? String(salary) : null, datePosted ? new Date(datePosted).toISOString() : null);
+                        continue;
+                    }
+                }
+            }
+            for (const child of node) walk(child);
+        } else if (typeof node === 'object') {
+            for (const value of Object.values(node)) {
+                walk(value);
+            }
+        }
+    };
+
+    walk(payload);
+    return jobs;
+};
+
+const extractJobsFromEmbeddedJson = (html, pageUrl) => {
+    const $ = cheerio.load(html);
+    const jobs = [];
+    const seen = new Set();
+
+    const pushJob = (job) => {
+        const url = normalizeUrl(job.url);
+        if (!url || seen.has(url)) return;
+        if (!job.title || job.title.length < 2 || job.title.length > 200) return;
+        jobs.push({
+            source: 'ziprecruiter',
+            listing_page_url: pageUrl,
+            title: job.title,
+            company: job.company || null,
+            location: job.location || null,
+            salary: job.salary || null,
+            date_posted: job.date_posted || null,
+            url,
+        });
+        seen.add(url);
+    };
+
+    // JSON-LD JobPosting blocks
+    $('script[type="application/ld+json"]').each((_, el) => {
+        const parsed = safeParseJson($(el).text());
+        const items = Array.isArray(parsed) ? parsed : [parsed];
+        for (const item of items) {
+            if (item && item['@type'] === 'JobPosting') {
+                pushJob({
+                    title: item.title,
+                    company: item.hiringOrganization?.name,
+                    location:
+                        item.jobLocation?.address?.addressLocality ||
+                        item.jobLocation?.address?.addressRegion ||
+                        item.jobLocation?.address?.addressCountry,
+                    salary: item.baseSalary?.value?.value || item.baseSalary?.value?.minValue,
+                    date_posted: item.datePosted ? new Date(item.datePosted).toISOString() : null,
+                    url: item.url || item.title?.url || item.directApplyLink,
+                });
+            }
+        }
+    });
+
+    // Generic embedded JSON (Next.js / app state)
+    const scriptCandidates = $(
+        'script[id="__NEXT_DATA__"], script[data-json], script[type="application/json"], script:not([src])',
+    ).toArray();
+
+    for (const el of scriptCandidates) {
+        const text = $(el).text();
+        if (!text || text.length < 20) continue;
+        const parsed = safeParseJson(text);
+        if (!parsed) continue;
+        const extracted = extractJobsFromJsonPayload(parsed, pageUrl);
+        for (const job of extracted) pushJob(job);
+        if (jobs.length) break; // stop early if we already found jobs
+    }
+
+    return jobs;
 };
 
 const buildCookieHeaderFromPlaywrightCookies = (cookies) => {
@@ -145,16 +334,24 @@ const handleOptInFlow = async (page) => {
  * - grabs cookies
  * - sets a realistic UA & viewport
  * - extracts initial job anchors (URL + title) from live DOM
+ * - captures JSON API responses if present (preferred)
  * This is used once; all subsequent listing + detail pages are got-scraping.
  */
-const doPlaywrightHandshake = async (url) => {
+const doPlaywrightHandshake = async (url, proxyConfiguration, sessionId) => {
     const fp = randomFingerprint();
     let browser;
+    const jsonApiJobs = [];
+    const jsonApiSources = [];
     try {
         log.info('Starting Playwright handshake', { url });
 
+        const proxyUrl = proxyConfiguration
+            ? await proxyConfiguration.newUrl({ session: sessionId })
+            : undefined;
+
         browser = await chromium.launch({
             headless: true,
+            proxy: proxyUrl ? { server: proxyUrl } : undefined,
             args: [
                 '--disable-blink-features=AutomationControlled',
                 '--disable-dev-shm-usage',
@@ -162,6 +359,8 @@ const doPlaywrightHandshake = async (url) => {
                 '--disable-setuid-sandbox',
                 '--disable-web-security',
                 '--disable-features=IsolateOrigins,site-per-process',
+                '--disable-features=BlockInsecurePrivateNetworkRequests',
+                '--disable-infobars',
             ],
         });
 
@@ -172,6 +371,8 @@ const doPlaywrightHandshake = async (url) => {
             timezoneId: 'America/New_York',
             permissions: ['geolocation'],
             geolocation: { longitude: -122.4194, latitude: 37.7749 },
+            bypassCSP: true,
+            proxy: proxyUrl ? { server: proxyUrl } : undefined,
         });
 
         // Enhanced navigator hardening to bypass Cloudflare
@@ -180,6 +381,11 @@ const doPlaywrightHandshake = async (url) => {
                 // Hide webdriver
                 Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
                 
+                Object.defineProperty(navigator, 'deviceMemory', { get: () => 8 });
+                Object.defineProperty(navigator, 'hardwareConcurrency', { get: () => 8 });
+                Object.defineProperty(navigator, 'maxTouchPoints', { get: () => 0 });
+                Object.defineProperty(navigator, 'doNotTrack', { get: () => '1' });
+
                 // Fake plugins
                 Object.defineProperty(navigator, 'plugins', {
                     get: () => [
@@ -192,6 +398,9 @@ const doPlaywrightHandshake = async (url) => {
                 // Fake languages
                 Object.defineProperty(navigator, 'languages', { get: () => ['en-US', 'en'] });
                 Object.defineProperty(navigator, 'platform', { get: () => 'Win32' });
+                Object.defineProperty(navigator, 'connection', {
+                    get: () => ({ effectiveType: '4g', rtt: 50, downlink: 10 }),
+                });
                 
                 // Fake chrome runtime
                 window.chrome = {
@@ -213,6 +422,30 @@ const doPlaywrightHandshake = async (url) => {
         });
 
         const page = await context.newPage();
+
+        // Capture JSON API responses early (preferred data source)
+        page.on('response', async (response) => {
+            try {
+                const headers = response.headers() || {};
+                const ct = (headers['content-type'] || headers['Content-Type'] || '').toLowerCase();
+                if (!ct.includes('json')) return;
+                if (jsonApiSources.length >= 4) return; // keep it light
+
+                const bodyText = await response.text();
+                if (!bodyText || bodyText.length > 900000) return; // avoid very large payloads
+                const parsed = safeParseJson(bodyText);
+                if (!parsed) return;
+
+                const urlFromResponse = response.url();
+                const extracted = extractJobsFromJsonPayload(parsed, urlFromResponse);
+                if (extracted.length) {
+                    jsonApiJobs.push(...extracted);
+                    jsonApiSources.push({ url: urlFromResponse });
+                }
+            } catch {
+                // ignore noisy errors from response parsing
+            }
+        });
 
         // Block heavy resources but allow scripts (needed for Cloudflare)
         await page.route('**/*', (route) => {
@@ -331,23 +564,28 @@ const doPlaywrightHandshake = async (url) => {
 
         const html = await page.content();
         const cookies = await context.cookies();
-
         const cookieHeader = buildCookieHeaderFromPlaywrightCookies(cookies);
         const ua = fp.ua;
+        const storageState = await context.storageState().catch(() => null);
 
         await browser.close().catch(() => {});
+
+        const initialJobsCombined = jsonApiJobs.length ? jsonApiJobs : initialJobs;
 
         log.info('Playwright handshake done', {
             cookieBytes: cookieHeader.length,
             htmlBytes: html.length,
-            initialJobs: initialJobs.length,
+            initialJobs: initialJobsCombined.length,
+            jsonApiHits: jsonApiJobs.length,
         });
 
         return {
             html,
             cookieHeader,
             userAgent: ua,
-            initialJobs,
+            initialJobs: initialJobsCombined,
+            jsonApiSources,
+            storageState,
         };
     } catch (err) {
         log.warning('Playwright handshake failed', { error: err.message ?? String(err) });
@@ -357,31 +595,109 @@ const doPlaywrightHandshake = async (url) => {
             cookieHeader: '',
             userAgent: randomFingerprint().ua,
             initialJobs: [],
+            jsonApiSources: [],
+            storageState: null,
         };
+    }
+};
+
+const playwrightFetchPageHtml = async ({ url, userAgent, proxyUrl, storageState }) => {
+    let browser;
+    const fp = randomFingerprint();
+    try {
+        browser = await chromium.launch({
+            headless: true,
+            proxy: proxyUrl ? { server: proxyUrl } : undefined,
+            args: [
+                '--disable-blink-features=AutomationControlled',
+                '--disable-dev-shm-usage',
+                '--no-sandbox',
+                '--disable-setuid-sandbox',
+                '--disable-web-security',
+                '--disable-features=IsolateOrigins,site-per-process',
+                '--disable-infobars',
+            ],
+        });
+
+        const context = await browser.newContext({
+            userAgent: userAgent || fp.ua,
+            viewport: fp.viewport,
+            locale: 'en-US',
+            timezoneId: 'America/New_York',
+            bypassCSP: true,
+            proxy: proxyUrl ? { server: proxyUrl } : undefined,
+            storageState: storageState || undefined,
+        });
+
+        await context.addInitScript(() => {
+            try {
+                Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
+                Object.defineProperty(navigator, 'hardwareConcurrency', { get: () => 8 });
+                Object.defineProperty(navigator, 'maxTouchPoints', { get: () => 0 });
+                Object.defineProperty(navigator, 'platform', { get: () => 'Win32' });
+                window.chrome = { runtime: {}, app: {} };
+            } catch {
+                // ignore
+            }
+        });
+
+        const page = await context.newPage();
+        await page.route('**/*', (route) => {
+            const type = route.request().resourceType();
+            if (['image', 'media', 'font'].includes(type)) return route.abort();
+            return route.continue();
+        });
+
+        await page.goto(url, { waitUntil: 'networkidle', timeout: 45000 });
+        await dismissPopupsPlaywright(page);
+        await handleOptInFlow(page);
+
+        const html = await page.content();
+        if (looksBlockedHtml(html)) {
+            throw new Error('Blocked HTML detected during Playwright detail fetch');
+        }
+        await browser.close().catch(() => {});
+        return html;
+    } catch (err) {
+        if (browser) await browser.close().catch(() => {});
+        throw err;
     }
 };
 
 // --- HTTP SCRAPING ------------------------------------------------------------
 
-const httpFetchHtml = async ({ url, userAgent, cookieHeader, proxyUrl, timeoutMs = 25000 }) => {
+const httpFetchHtml = async ({
+    url,
+    userAgent,
+    cookieHeader,
+    proxyUrl,
+    timeoutMs = 25000,
+    retries = 2,
+    extraHeaders = {},
+}) => {
     log.debug('HTTP fetch', { url });
 
-    const res = await gotScraping({
-        url,
-        proxyUrl,
-        timeout: { request: timeoutMs },
-        http2: true,
-        decompress: true,
-        retry: { limit: 1 },
-        headers: {
-            'user-agent': userAgent,
-            accept:
-                'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
-            'accept-language': 'en-US,en;q=0.9',
-            referer: BASE_URL + '/',
-            ...(cookieHeader ? { cookie: cookieHeader } : {}),
-        },
-    });
+    const res = await retryWithBackoff(
+        async () =>
+            gotScraping({
+                url,
+                proxyUrl,
+                timeout: { request: timeoutMs },
+                http2: true,
+                decompress: true,
+                retry: { limit: 0 },
+                headers: {
+                    'user-agent': userAgent,
+                    accept:
+                        'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
+                    'accept-language': 'en-US,en;q=0.9',
+                    referer: BASE_URL + '/',
+                    ...(cookieHeader ? { cookie: cookieHeader } : {}),
+                    ...extraHeaders,
+                },
+            }),
+        { attempts: Math.max(1, retries), startMs: 700 },
+    );
 
     const { statusCode } = res;
     if (statusCode >= 400) {
@@ -400,18 +716,59 @@ const httpFetchHtml = async ({ url, userAgent, cookieHeader, proxyUrl, timeoutMs
     return body;
 };
 
-// --- LISTING PARSING ----------------------------------------------------------
+const httpFetchJson = async ({
+    url,
+    userAgent,
+    cookieHeader,
+    proxyUrl,
+    timeoutMs = 20000,
+    retries = 2,
+    extraHeaders = {},
+}) => {
+    log.debug('HTTP fetch JSON', { url });
 
-const normalizeUrl = (href) => {
-    if (!href) return null;
-    try {
-        return new URL(href, BASE_URL).href;
-    } catch {
-        return null;
+    const res = await retryWithBackoff(
+        async () =>
+            gotScraping({
+                url,
+                proxyUrl,
+                timeout: { request: timeoutMs },
+                http2: true,
+                decompress: true,
+                retry: { limit: 0 },
+                headers: {
+                    'user-agent': userAgent,
+                    accept: 'application/json,text/plain,*/*',
+                    'accept-language': 'en-US,en;q=0.9',
+                    referer: BASE_URL + '/',
+                    ...(cookieHeader ? { cookie: cookieHeader } : {}),
+                    ...extraHeaders,
+                },
+            }),
+        { attempts: Math.max(1, retries), startMs: 600 },
+    );
+
+    const { statusCode } = res;
+    if (statusCode >= 400) {
+        throw new Error(`HTTP ${statusCode} for ${url}`);
     }
+
+    const body = res.body?.toString() ?? '';
+    if (!body) {
+        throw new Error(`Empty JSON body for ${url}`);
+    }
+
+    const parsed = safeParseJson(body);
+    if (!parsed) {
+        throw new Error(`Failed to parse JSON for ${url}`);
+    }
+
+    return parsed;
 };
 
-/**
+// --- LISTING PARSING ----------------------------------------------------------
+
+/** 
  * DOM-based listing parser for ZipRecruiter using Cheerio.
  * We try specific card selectors, then fallback to generic h2/h3-based parsing.
  */
@@ -595,6 +952,59 @@ const extractJobsFromDom = (html, pageUrl) => {
 
 // --- DETAIL PAGE PARSING ------------------------------------------------------
 
+const extractDetailFromJsonStructure = (payload) => {
+    if (!payload) return null;
+    const detail = {};
+    const visited = new Set();
+
+    const visit = (node) => {
+        if (!node || visited.has(node)) return;
+        if (typeof node === 'object') visited.add(node);
+
+        if (Array.isArray(node)) {
+            for (const child of node) visit(child);
+            return;
+        }
+
+        if (typeof node === 'object') {
+            const title = node.title || node.job_title || node.name || node.position;
+            const company =
+                node.company ||
+                node.company_name ||
+                node.employer ||
+                node.hiringOrganization?.name;
+            const location =
+                node.location ||
+                node.city ||
+                node.region ||
+                node.jobLocation?.address?.addressLocality ||
+                node.jobLocation?.address?.addressRegion ||
+                node.jobLocation?.address?.addressCountry;
+            const descriptionHtml = node.description || node.job_description || node.body;
+            const datePosted = node.date_posted || node.datePosted || node.posted_at;
+
+            if (title && !detail.title) detail.title = String(title);
+            if (company && !detail.company) detail.company = String(company);
+            if (location && !detail.location) detail.location = String(location);
+            if (descriptionHtml && !detail.description_html) {
+                detail.description_html = String(descriptionHtml);
+                const tmp = cheerio.load(detail.description_html);
+                detail.description_text = tmp('body').text().replace(/\s+/g, ' ').trim();
+            }
+            if (datePosted && !detail.date_posted) {
+                detail.date_posted = new Date(datePosted).toISOString();
+            }
+
+            for (const value of Object.values(node)) {
+                visit(value);
+            }
+        }
+    };
+
+    visit(payload);
+    return Object.keys(detail).length ? detail : null;
+};
+
 const extractJobDetail = (html) => {
     const result = {};
 
@@ -634,6 +1044,31 @@ const extractJobDetail = (html) => {
             // ignore bad JSON blocks
         }
     });
+
+    if (!result.title || !result.description_html) {
+        const scriptCandidates = $(
+            'script[id="__NEXT_DATA__"], script[type="application/json"], script[data-json]',
+        ).toArray();
+        for (const el of scriptCandidates) {
+            const parsed = safeParseJson($(el).text());
+            if (!parsed) continue;
+            const detailFromJson = extractDetailFromJsonStructure(parsed);
+            if (detailFromJson) {
+                Object.assign(
+                    result,
+                    {
+                        title: detailFromJson.title || result.title,
+                        company: detailFromJson.company || result.company,
+                        location: detailFromJson.location || result.location,
+                        description_html: detailFromJson.description_html || result.description_html,
+                        description_text: detailFromJson.description_text || result.description_text,
+                        date_posted: detailFromJson.date_posted || result.date_posted,
+                    },
+                );
+            }
+            if (result.title && result.description_html) break;
+        }
+    }
 
     // DOM fallbacks
     if (!result.title) {
@@ -712,6 +1147,9 @@ Actor.main(async () => {
         max_pages = DEFAULT_MAX_PAGES,
         max_detail_concurrency = DEFAULT_MAX_DETAIL_CONCURRENCY,
         detail_mode = 'full', // 'none' | 'basic' | 'full'
+        detail_playwright_fallback = false,
+        listing_fetch_retries = 2,
+        detail_fetch_retries = 2,
         proxyConfiguration: proxyFromInput,
     } = input;
 
@@ -739,14 +1177,22 @@ Actor.main(async () => {
         handshakeAttempted: false,
         handshakeSucceeded: false,
         handshakeInitialJobs: 0,
+        handshakeJsonSources: 0,
         pagesFetched: 0,
         pagesFailed: 0,
         pagesBlockedOrCaptcha: 0,
+        listingJsonHits: 0,
+        listingJsonFailures: 0,
+        listingEmbeddedJsonHits: 0,
+        listingDomHits: 0,
         jobsFromDomFallback: 0,
         jobsSaved: 0,
         detailRequests: 0,
         detailSuccess: 0,
         detailFailed: 0,
+        detailPlaywrightAttempts: 0,
+        detailPlaywrightSuccess: 0,
+        detailPlaywrightFailed: 0,
         stoppedReason: null,
     };
 
@@ -758,6 +1204,9 @@ Actor.main(async () => {
         pagesLimit,
         detailMode,
         detailConcurrency,
+        detail_playwright_fallback,
+        listing_fetch_retries,
+        detail_fetch_retries,
     });
 
     // Proxy config (for HTTP scraping only)
@@ -769,6 +1218,10 @@ Actor.main(async () => {
         },
     );
 
+    const sessionId = `sess-${Date.now()}-${Math.floor(Math.random() * 100000)}`;
+    const getProxyUrl = async (session = sessionId) =>
+        proxyConfiguration ? proxyConfiguration.newUrl({ session }) : undefined;
+
     const handshakeUrl = startUrlToUse;
     stats.handshakeAttempted = true;
     let handshakeHtml = '';
@@ -776,17 +1229,54 @@ Actor.main(async () => {
     let handshakeUserAgent = randomFingerprint().ua;
     let handshakeInitialJobs = [];
 
-    const handshakeResult = await doPlaywrightHandshake(handshakeUrl);
+    const handshakeResult = await doPlaywrightHandshake(handshakeUrl, proxyConfiguration, sessionId);
     handshakeHtml = handshakeResult.html || '';
     handshakeCookieHeader = handshakeResult.cookieHeader || '';
     handshakeUserAgent = handshakeResult.userAgent || handshakeUserAgent;
     handshakeInitialJobs = handshakeResult.initialJobs || [];
+    const handshakeJsonSources = handshakeResult.jsonApiSources || [];
+    const handshakeStorageState = handshakeResult.storageState || null;
     stats.handshakeSucceeded = Boolean(handshakeHtml && handshakeCookieHeader);
     stats.handshakeInitialJobs = handshakeInitialJobs.length;
+    stats.handshakeJsonSources = (handshakeResult.jsonApiSources || []).length;
 
     if (!stats.handshakeSucceeded) {
         log.warning('Continuing with HTTP-only mode (handshake did not fully succeed)');
     }
+
+    const deriveJsonUrlForPage = (pageNum) => {
+        for (const src of handshakeJsonSources) {
+            if (!src?.url) continue;
+            const nextUrl = buildJsonPageUrlFromSource(src.url, pageNum);
+            if (nextUrl) return nextUrl;
+        }
+        return null;
+    };
+
+    const fetchListingViaJson = async (pageNum) => {
+        const jsonUrl = deriveJsonUrlForPage(pageNum);
+        if (!jsonUrl) return null;
+        try {
+            const proxyUrl = await getProxyUrl(`${sessionId}-json-${pageNum}`);
+            const json = await httpFetchJson({
+                url: jsonUrl,
+                userAgent: handshakeUserAgent,
+                cookieHeader: handshakeCookieHeader,
+                proxyUrl,
+                retries: listing_fetch_retries,
+            });
+            const jobs = extractJobsFromJsonPayload(json, jsonUrl);
+            if (jobs.length) {
+                stats.listingJsonHits += jobs.length;
+                return { jobs, jsonUrl };
+            }
+            stats.listingJsonFailures++;
+        } catch (err) {
+            stats.listingJsonFailures++;
+            log.debug('JSON listing fetch failed', { url: jsonUrl, error: err.message ?? String(err) });
+        }
+        return null;
+    };
 
     let savedCount = 0;
 
@@ -797,29 +1287,43 @@ Actor.main(async () => {
             ? buildPageUrlFromStart(startUrlToUse, pageNum)
             : buildSearchUrl(keyword.trim(), location.trim(), pageNum);
 
-        let html;
-        let jobs;
+        let html = '';
+        let jobs = [];
+        let listingSource = 'unknown';
 
         try {
-            // PAGE 1: Prefer jobs extracted directly from Playwright DOM if we have them
-            if (pageNum === 1 && handshakeInitialJobs.length > 0) {
+            const jsonResult = await fetchListingViaJson(pageNum);
+            if (jsonResult?.jobs?.length) {
+                jobs = jsonResult.jobs;
+                listingSource = 'json-api';
+            }
+
+            // PAGE 1: Prefer jobs extracted directly from Playwright DOM/JSON if we have them
+            if (!jobs.length && pageNum === 1 && handshakeInitialJobs.length > 0) {
                 html = handshakeHtml;
                 jobs = handshakeInitialJobs;
+                listingSource = 'handshake-initial';
                 log.info('Using jobs extracted from Playwright handshake for page 1', {
                     count: jobs.length,
                 });
-            } else {
-                // Either page > 1, or handshake had no jobs -> fetch via HTTP and parse DOM
+            }
+
+            // HTML path
+            if (!jobs.length) {
                 if (pageNum === 1 && handshakeHtml) {
                     html = handshakeHtml;
-                    log.info('Using HTML from Playwright handshake for page 1 (DOM parse)');
+                    listingSource = listingSource === 'unknown' ? 'handshake-html' : listingSource;
+                    log.info('Using HTML from Playwright handshake for page 1 (parse flow)');
                 } else {
-                    const proxyUrl = proxyConfiguration ? await proxyConfiguration.newUrl() : undefined;
+                    const proxyUrl = await getProxyUrl(
+                        `${sessionId}-list-${pageNum}-${Math.floor(Math.random() * 10)}`,
+                    );
                     html = await httpFetchHtml({
                         url: listingUrl,
                         userAgent: handshakeUserAgent,
                         cookieHeader: handshakeCookieHeader,
                         proxyUrl,
+                        retries: listing_fetch_retries,
                     });
                 }
 
@@ -830,7 +1334,18 @@ Actor.main(async () => {
                     break;
                 }
 
-                jobs = extractJobsFromDom(html, listingUrl);
+                const embeddedJobs = extractJobsFromEmbeddedJson(html, listingUrl);
+                if (embeddedJobs.length) {
+                    jobs = embeddedJobs;
+                    listingSource = 'embedded-json';
+                    stats.listingEmbeddedJsonHits += jobs.length;
+                }
+
+                if (!jobs.length) {
+                    jobs = extractJobsFromDom(html, listingUrl);
+                    listingSource = 'dom';
+                    stats.listingDomHits += jobs.length;
+                }
             }
         } catch (err) {
             stats.pagesFailed++;
@@ -853,8 +1368,6 @@ Actor.main(async () => {
             break;
         }
 
-        stats.pagesFetched++;
-
         if (!jobs || !jobs.length) {
             // Extra debug only on first page to avoid huge logs
             if (pageNum === 1 && html) {
@@ -870,11 +1383,15 @@ Actor.main(async () => {
             break;
         }
 
-        stats.jobsFromDomFallback += jobs.length;
+        stats.pagesFetched++;
+        if (listingSource === 'dom') {
+            stats.jobsFromDomFallback += jobs.length;
+        }
 
         log.info(`Parsed ${jobs.length} jobs from listing page`, {
             pageNum,
             url: listingUrl,
+            source: listingSource,
         });
 
         // Decide which jobs get detail fetch based on detailMode
@@ -885,8 +1402,6 @@ Actor.main(async () => {
             if (detailMode === 'basic') return index < 5; // first few per page
             return true; // full mode
         };
-
-        const proxyUrlForDetails = proxyConfiguration ? await proxyConfiguration.newUrl() : undefined;
 
         const enrichedJobs = await processWithConcurrency(
             jobsToProcess,
@@ -919,12 +1434,16 @@ Actor.main(async () => {
 
                 stats.detailRequests++;
                 try {
+                    const proxyUrlForDetails = await getProxyUrl(
+                        `${sessionId}-detail-${index % Math.max(1, detailConcurrency)}`,
+                    );
                     const htmlDetail = await httpFetchHtml({
                         url: baseJob.url,
                         userAgent: handshakeUserAgent,
                         cookieHeader: handshakeCookieHeader,
                         proxyUrl: proxyUrlForDetails,
                         timeoutMs: 30000,
+                        retries: detail_fetch_retries,
                     });
 
                     const detail = extractJobDetail(htmlDetail);
@@ -956,6 +1475,46 @@ Actor.main(async () => {
                         url: baseJob.url,
                         error: err.message ?? String(err),
                     });
+
+                    if (detail_playwright_fallback) {
+                        stats.detailPlaywrightAttempts++;
+                        try {
+                            const proxyUrlForPw = await getProxyUrl(
+                                `${sessionId}-detail-pw-${index % Math.max(2, detailConcurrency)}`,
+                            );
+                            const pwHtml = await playwrightFetchPageHtml({
+                                url: baseJob.url,
+                                userAgent: handshakeUserAgent,
+                                proxyUrl: proxyUrlForPw,
+                                storageState: handshakeStorageState,
+                            });
+                            const detail = extractJobDetail(pwHtml);
+                            stats.detailPlaywrightSuccess++;
+
+                            return {
+                                ...baseJob,
+                                title:
+                                    detail.title && detail.title.length >= 2 && detail.title.length <= 200
+                                        ? detail.title
+                                        : baseJob.title,
+                                company: detail.company || baseJob.company,
+                                location: detail.location || baseJob.location,
+                                salary: baseJob.salary || null,
+                                date_posted: detail.date_posted || baseJob.date_posted || null,
+                                description_html: detail.description_html || null,
+                                description_text: detail.description_text || null,
+                                keyword_search: keyword || null,
+                                location_search: location || null,
+                                extracted_at: new Date().toISOString(),
+                            };
+                        } catch (pwErr) {
+                            stats.detailPlaywrightFailed++;
+                            log.debug('Playwright detail fallback failed', {
+                                url: baseJob.url,
+                                error: pwErr.message ?? String(pwErr),
+                            });
+                        }
+                    }
 
                     return {
                         ...baseJob,

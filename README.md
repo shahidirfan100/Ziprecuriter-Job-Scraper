@@ -4,13 +4,12 @@ Extract comprehensive job listings from ZipRecruiter.com - the leading global jo
 
 ## Features
 
-- **Comprehensive Job Data**: Extracts job titles, companies, locations, salaries, posting dates, and full descriptions
-- **Flexible Search Options**: Search by keywords, locations, or specific ZipRecruiter URLs
-- **Smart Pagination**: Automatically handles multi-page results with configurable limits
-- **Detailed Job Information**: Optionally fetches complete job descriptions and additional metadata
-- **Reliable Data Collection**: Built for production use with robust error handling and retry mechanisms
-- **Customizable Results**: Control the number of jobs and pages to scrape
-- **SEO Optimized**: Designed for maximum discoverability on job search platforms
+- **JSON-first, then HTML**: Captures in-page JSON/API data during a stealth Playwright handshake, falling back to HTML parsing only when needed
+- **Stealth + anti-blocking**: Hardened navigator spoofing, resource blocking, per-session proxies, and jittered concurrency to avoid Cloudflare/captcha walls
+- **Fast detail enrichment**: Concurrency-controlled detail fetches with retries/backoff and optional Playwright fallback for blocked pages
+- **Structured parsing**: JSON-LD/Next.js state parsing plus resilient DOM selectors for titles, companies, salaries, locations, and descriptions
+- **Rich telemetry**: Saves `STATS` with JSON/HTML hit counts, block counters, and detail success/failure numbers for quick debugging
+- **Configurable**: Tune pages, results, detail depth, retries, and proxy settings for cost/speed balance
 
 ## Use Cases
 
@@ -30,22 +29,19 @@ Track industry hiring patterns and benchmark recruitment strategies against mark
 
 Configure your job search with these flexible input options:
 
-### Basic Search Parameters
-
-| Field | Type | Description | Example |
-|-------|------|-------------|---------|
-| `keyword` | string | Job title, role, or skill keywords | `"Software Engineer"`, `"Data Analyst"`, `"Project Manager"` |
-| `location` | string | City, region, or "Remote" | `"San Francisco"`, `"New York"`, `"Remote"` |
-| `startUrl` | string | Direct ZipRecruiter search URL (overrides basic search) | `"https://www.ziprecruiter.com/jobs-search?search=engineer&location=san-francisco"` |
-
-### Advanced Options
-
 | Field | Type | Description | Default |
 |-------|------|-------------|---------|
-| `results_wanted` | number | Maximum jobs to collect (1-1000) | `100` |
-| `max_pages` | number | Maximum search pages to process | `20` |
-| `collectDetails` | boolean | Scrape full job descriptions from detail pages | `true` |
-| `proxyConfiguration` | object | Apify Proxy settings for reliable scraping | - |
+| `keyword` | string | Job title, role, or skill keywords | `""` |
+| `location` | string | City, region, or "Remote" | `""` |
+| `startUrl` | string | Direct ZipRecruiter search URL (overrides keyword/location) | `""` |
+| `results_wanted` | number | Maximum jobs to collect | `20` |
+| `max_pages` | number | Max listing pages to walk (hard limit 50) | `5` |
+| `detail_mode` | enum | `none` (skip), `basic` (first few per page), `full` (all) | `full` |
+| `max_detail_concurrency` | number | Parallel detail fetches (1-8) | `3` |
+| `listing_fetch_retries` | number | Retries with backoff for listing fetch | `2` |
+| `detail_fetch_retries` | number | Retries with backoff for detail fetch | `2` |
+| `detail_playwright_fallback` | boolean | Use stealth Playwright when detail HTML is blocked | `false` |
+| `proxyConfiguration` | object | Apify Proxy settings (RESIDENTIAL recommended) | `{ useApifyProxy: true, groups: ["RESIDENTIAL"], countryCode: "GB" }` |
 
 ## Output Data Structure
 
@@ -92,7 +88,7 @@ Each job listing is saved as a structured JSON object:
   "keyword": "Software Engineer",
   "location": "San Francisco",
   "results_wanted": 50,
-  "collectDetails": true
+  "detail_mode": "full"
 }
 ```
 
@@ -105,7 +101,8 @@ Each job listing is saved as a structured JSON object:
   "keyword": "Data Analyst",
   "location": "New York",
   "results_wanted": 25,
-  "max_pages": 5
+  "max_pages": 5,
+  "detail_mode": "basic"
 }
 ```
 
@@ -116,7 +113,7 @@ Each job listing is saved as a structured JSON object:
 ```json
 {
   "startUrl": "https://www.ziprecruiter.com/jobs-search?search=project+manager&location=remote",
-  "collectDetails": false,
+  "detail_mode": "none",
   "results_wanted": 100
 }
 ```
@@ -142,7 +139,7 @@ Control the scope of your scraping:
 
 - `results_wanted`: Maximum number of job listings to collect
 - `max_pages`: Safety limit on search result pages to process
-- `collectDetails`: Whether to fetch full job descriptions (increases processing time)
+- `detail_mode`: Choose `none` to skip details, `basic` for the first few per page, or `full` for every job (more thorough but slower)
 
 ## Limits and Considerations
 
