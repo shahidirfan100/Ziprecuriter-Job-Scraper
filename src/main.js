@@ -344,9 +344,7 @@ const doPlaywrightHandshake = async (url, proxyConfiguration, sessionId) => {
     try {
         log.info('Starting Playwright handshake', { url });
 
-        const proxyUrl = proxyConfiguration
-            ? await proxyConfiguration.newUrl({ session: sessionId })
-            : undefined;
+        const proxyUrl = proxyConfiguration ? await proxyConfiguration.newUrl(sessionId) : undefined;
 
         browser = await chromium.launch({
             headless: true,
@@ -1219,7 +1217,7 @@ Actor.main(async () => {
 
     const sessionId = `sess-${Date.now()}-${Math.floor(Math.random() * 100000)}`;
     const getProxyUrl = async (session = sessionId) =>
-        proxyConfiguration ? proxyConfiguration.newUrl({ session }) : undefined;
+        proxyConfiguration ? proxyConfiguration.newUrl(session) : undefined;
 
     const handshakeUrl = startUrlToUse;
     stats.handshakeAttempted = true;
