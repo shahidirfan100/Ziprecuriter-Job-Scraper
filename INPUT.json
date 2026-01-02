@@ -1,13 +1,12 @@
 {
   "searchQuery": "software engineer",
-  "location": "New York, NY",
   "maxJobs": 50,
   "radius": "25",
-  "daysBack": "7",
-  "employmentType": [],
-  "remoteOnly": false,
+  "daysBack": "any",
   "proxyConfiguration": {
     "useApifyProxy": true,
-    "apifyProxyGroups": ["RESIDENTIAL"]
+    "apifyProxyGroups": [
+      "RESIDENTIAL"
+    ]
   }
 }

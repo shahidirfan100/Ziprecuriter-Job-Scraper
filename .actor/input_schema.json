@@ -21,10 +21,8 @@
         "location": {
             "title": "Location",
             "type": "string",
-            "description": "Location to search for jobs (e.g., 'New York, NY', 'San Francisco, CA', 'Remote'). Required if searchUrl is not provided.",
-            "editor": "textfield",
-            "default": "New York, NY",
-            "prefill": "New York, NY"
+            "description": "Location to search for jobs (e.g., 'New York, NY', 'Remote'). Leave empty to search nationwide.",
+            "editor": "textfield"
         },
         "maxJobs": {
             "title": "Maximum Jobs",
