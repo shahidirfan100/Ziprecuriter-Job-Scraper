@@ -34,6 +34,12 @@
             "minimum": 0,
             "maximum": 10000
         },
+        "enrichDescriptions": {
+            "title": "Fetch Full Descriptions",
+            "type": "boolean",
+            "description": "Click each job to load full description. Set to false for faster scraping without descriptions.",
+            "default": true
+        },
         "radius": {
             "title": "Search Radius (miles)",
             "type": "string",
@@ -85,7 +91,9 @@
             "editor": "proxy",
             "default": {
                 "useApifyProxy": true,
-                "apifyProxyGroups": ["RESIDENTIAL"]
+                "apifyProxyGroups": [
+                    "RESIDENTIAL"
+                ]
             }
         }
     },
