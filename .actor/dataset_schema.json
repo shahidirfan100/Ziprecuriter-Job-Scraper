@@ -13,12 +13,10 @@
                     "salary",
                     "jobType",
                     "postedDate",
-                    "descriptionHtml",
-                    "descriptionText",
                     "url",
-                    "applyUrl",
                     "companyUrl",
-                    "benefits"
+                    "jobId",
+                    "scrapedAt"
                 ]
             },
             "display": {
@@ -48,29 +46,21 @@
                         "label": "Posted",
                         "format": "text"
                     },
-                    "descriptionHtml": {
-                        "label": "Description (HTML)",
-                        "format": "text"
-                    },
-                    "descriptionText": {
-                        "label": "Description (Text)",
-                        "format": "text"
-                    },
                     "url": {
                         "label": "Job URL",
-                        "format": "link"
-                    },
-                    "applyUrl": {
-                        "label": "Apply URL",
                         "format": "link"
                     },
                     "companyUrl": {
                         "label": "Company URL",
                         "format": "link"
                     },
-                    "benefits": {
-                        "label": "Benefits",
+                    "jobId": {
+                        "label": "Job ID",
                         "format": "text"
+                    },
+                    "scrapedAt": {
+                        "label": "Scraped At",
+                        "format": "date"
                     }
                 }
             }
