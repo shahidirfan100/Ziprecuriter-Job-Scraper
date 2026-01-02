@@ -1,11 +1,36 @@
 {
     "actorOutputSchemaVersion": 1,
-    "title": "Output schema",
+    "title": "ZipRecruiter Jobs Output",
     "properties": {
-        "overview": {
+        "jobs": {
             "type": "string",
-            "title": "Overview",
+            "title": "Job Listings",
+            "description": "Complete ZipRecruiter job listings with all details",
             "template": "{{links.apiDefaultDatasetUrl}}/items?view=overview"
+        },
+        "jobsCSV": {
+            "type": "string",
+            "title": "Download as CSV",
+            "description": "Export jobs in CSV format",
+            "template": "{{links.apiDefaultDatasetUrl}}/items?format=csv"
+        },
+        "jobsJSON": {
+            "type": "string",
+            "title": "Download as JSON",
+            "description": "Export jobs in JSON format",
+            "template": "{{links.apiDefaultDatasetUrl}}/items?format=json"
+        },
+        "jobsExcel": {
+            "type": "string",
+            "title": "Download as Excel",
+            "description": "Export jobs in Excel format",
+            "template": "{{links.apiDefaultDatasetUrl}}/items?format=xlsx"
+        },
+        "statistics": {
+            "type": "string",
+            "title": "Scraping Statistics",
+            "description": "Summary statistics and performance metrics",
+            "template": "{{links.apiDefaultKeyValueStoreUrl}}/keys/statistics"
         }
     }
 }

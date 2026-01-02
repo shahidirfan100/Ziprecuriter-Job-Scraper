@@ -1,14 +1,21 @@
 {
-  "actorSpecification": 1,
-  "name": "ziprecruiter-job-scraper",
-  "version": "1.0.0",
-  "buildTag": "latest",
-  "dockerfile": "./Dockerfile",
-  "readme": "../README.md",
-  "input": "./input_schema.json",
-  "output": "./output_schema.json",
-  "nodeJsVersion": "22",
-  "storages": {
-    "dataset": "./dataset_schema.json"
-  }
+    "actorSpecification": 1,
+    "name": "ziprecruiter-jobs-scraper",
+    "title": "ZipRecruiter Jobs Scraper",
+    "description": "Extract comprehensive job listings from ZipRecruiter with advanced search capabilities. Get structured job data including titles, companies, locations, salaries, job types, descriptions, and application links. Perfect for job market analysis, recruitment automation, and employment research with multiple extraction strategies.",
+    "version": "1.0",
+    "categories": [
+        "BUSINESS",
+        "JOBS"
+    ],
+    "meta": {
+        "templateId": "ziprecruiter-jobs-scraper",
+        "generatedBy": "Claude Sonnet 4.5"
+    },
+    "input": "./input_schema.json",
+    "output": "./output_schema.json",
+    "storages": {
+        "dataset": "./dataset_schema.json"
+    },
+    "dockerfile": "../Dockerfile"
 }

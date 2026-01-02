@@ -1,53 +1,79 @@
 {
-  "actorSpecification": 1,
-  "fields": {},
-  "views": {
-    "overview": {
-      "title": "Overview",
-      "transformation": {
-        "fields": [
-          "title",
-          "company",
-          "location",
-          "salary",
-          "job_type",
-          "date_posted",
-          "url"
-        ]
-      },
-      "display": {
-        "component": "table",
-        "properties": {
-          "title": {
-            "label": "Job Title",
-            "format": "text"
-          },
-          "company": {
-            "label": "Company",
-            "format": "text"
-          },
-          "location": {
-            "label": "Location",
-            "format": "text"
-          },
-          "salary": {
-            "label": "Salary",
-            "format": "text"
-          },
-          "job_type": {
-            "label": "Job Type",
-            "format": "text"
-          },
-          "date_posted": {
-            "label": "Posted",
-            "format": "text"
-          },
-          "url": {
-            "label": "URL",
-            "format": "link"
-          }
+    "actorSpecification": 1,
+    "fields": {},
+    "views": {
+        "overview": {
+            "title": "ZipRecruiter Job Listings",
+            "description": "Complete view of all scraped ZipRecruiter job listings with details",
+            "transformation": {
+                "fields": [
+                    "title",
+                    "company",
+                    "location",
+                    "salary",
+                    "jobType",
+                    "postedDate",
+                    "descriptionHtml",
+                    "descriptionText",
+                    "url",
+                    "applyUrl",
+                    "companyUrl",
+                    "benefits"
+                ]
+            },
+            "display": {
+                "component": "table",
+                "properties": {
+                    "title": {
+                        "label": "Job Title",
+                        "format": "text"
+                    },
+                    "company": {
+                        "label": "Company",
+                        "format": "text"
+                    },
+                    "location": {
+                        "label": "Location",
+                        "format": "text"
+                    },
+                    "salary": {
+                        "label": "Salary",
+                        "format": "text"
+                    },
+                    "jobType": {
+                        "label": "Job Type",
+                        "format": "text"
+                    },
+                    "postedDate": {
+                        "label": "Posted",
+                        "format": "text"
+                    },
+                    "descriptionHtml": {
+                        "label": "Description (HTML)",
+                        "format": "text"
+                    },
+                    "descriptionText": {
+                        "label": "Description (Text)",
+                        "format": "text"
+                    },
+                    "url": {
+                        "label": "Job URL",
+                        "format": "link"
+                    },
+                    "applyUrl": {
+                        "label": "Apply URL",
+                        "format": "link"
+                    },
+                    "companyUrl": {
+                        "label": "Company URL",
+                        "format": "link"
+                    },
+                    "benefits": {
+                        "label": "Benefits",
+                        "format": "text"
+                    }
+                }
+            }
         }
-      }
     }
-  }
 }

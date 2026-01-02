@@ -1,7 +1,13 @@
 {
-  "keyword": "software engineer",
-  "location": "san francisco",
-  "results_wanted": 20,
-  "max_pages": 3,
-  "collectDetails": false
+  "searchQuery": "software engineer",
+  "location": "New York, NY",
+  "maxJobs": 50,
+  "radius": "25",
+  "daysBack": "7",
+  "employmentType": [],
+  "remoteOnly": false,
+  "proxyConfiguration": {
+    "useApifyProxy": true,
+    "apifyProxyGroups": ["RESIDENTIAL"]
+  }
 }
