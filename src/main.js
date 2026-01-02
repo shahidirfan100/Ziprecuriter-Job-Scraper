@@ -1,6 +1,6 @@
 /**
  * ZipRecruiter Jobs Scraper - Production Ready
- * Fast listing-only extraction with reliable pagination
+ * Uses infinite scroll pagination (not button clicks)
  */
 
 import { PlaywrightCrawler } from '@crawlee/playwright';
@@ -15,19 +15,17 @@ await Actor.init();
 // ============================================================================
 const CONFIG = {
     CLOUDFLARE_WAIT: 5000,
-    PAGE_LOAD_WAIT: 2500,
-    SCROLL_WAIT: 300,
-    BETWEEN_PAGES_MIN: 500,
-    BETWEEN_PAGES_MAX: 1000,
-    MAX_PAGES: 100,
-    MAX_EMPTY_PAGES: 2,
+    SCROLL_WAIT: 800,           // Wait after each scroll for new jobs to load
+    SCROLL_BATCH_SIZE: 20,      // Approx jobs per scroll batch
+    MAX_SCROLLS: 100,           // Safety limit
+    MAX_STALE_SCROLLS: 3,       // Stop after N scrolls with no new jobs
 };
 
 // ============================================================================
 // STATISTICS
 // ============================================================================
 const stats = {
-    pagesProcessed: 0,
+    scrollCount: 0,
     jobsExtracted: 0,
     duplicates: 0,
     startTime: Date.now(),
@@ -38,18 +36,17 @@ const stats = {
 // ============================================================================
 
 function buildSearchUrl(input) {
-    // Priority 1: Direct URL
     if (input.searchUrl?.trim()) {
         return input.searchUrl.trim();
     }
 
-    // Priority 2: Build from parameters
     const params = new URLSearchParams();
 
     if (input.searchQuery?.trim()) {
         params.append('search', input.searchQuery.trim());
     }
 
+    // Use "United States" for nationwide if no location specified
     if (input.location?.trim()) {
         params.append('location', input.location.trim());
     }
@@ -72,7 +69,7 @@ function buildSearchUrl(input) {
 // JOB EXTRACTION
 // ============================================================================
 
-async function extractJobs(page) {
+async function extractAllJobs(page) {
     return page.evaluate(() => {
         const jobs = [];
         const cards = document.querySelectorAll('.job_result_two_pane_v2');
@@ -140,100 +137,34 @@ async function extractJobs(page) {
 }
 
 // ============================================================================
-// PAGINATION - Multiple button selectors
+// INFINITE SCROLL PAGINATION
 // ============================================================================
 
-async function clickNextPage(page) {
-    // Try multiple selectors for Next Page button
-    const selectors = [
-        'button[title="Next Page"]',
-        'button[aria-label="Next Page"]',
-        'button:has-text("Next")',
-        '[data-testid="next-page"]',
-        '.pagination-next',
-        'a[title="Next Page"]',
-    ];
+async function scrollToLoadMore(page) {
+    return page.evaluate(async () => {
+        const container = document.querySelector('section.job_results_two_pane');
+        if (!container) return false;
 
-    for (const selector of selectors) {
-        try {
-            const button = await page.$(selector);
-            if (!button) continue;
+        const previousHeight = container.scrollHeight;
+        container.scrollTop = container.scrollHeight;
 
-            // Check if button is visible and enabled
-            const isVisible = await button.isVisible();
-            const isDisabled = await button.evaluate(el =>
-                el.disabled || el.hasAttribute('disabled') || el.classList.contains('disabled')
-            );
+        // Wait for new content
+        await new Promise(r => setTimeout(r, 500));
 
-            if (!isVisible || isDisabled) {
-                log.debug(`Button ${selector} is not clickable`);
-                continue;
-            }
+        // Check if more content loaded
+        return container.scrollHeight > previousHeight;
+    });
+}
 
-            // Scroll into view and click
-            await button.scrollIntoViewIfNeeded();
-            await page.waitForTimeout(200);
-            await button.click();
-
-            log.debug(`Clicked: ${selector}`);
-
-            // Wait for content to load
-            await page.waitForTimeout(CONFIG.PAGE_LOAD_WAIT);
-
-            // Verify new content loaded (jobs should be present)
-            const hasJobs = await page.$('.job_result_two_pane_v2');
-            if (hasJobs) {
-                return true;
-            }
-        } catch (e) {
-            log.debug(`Selector ${selector} failed: ${e.message}`);
-        }
-    }
-
-    // Fallback: Try clicking via JavaScript
-    try {
-        const clicked = await page.evaluate(() => {
-            const buttons = document.querySelectorAll('button');
-            for (const btn of buttons) {
-                const title = btn.getAttribute('title') || '';
-                const text = btn.textContent || '';
-                if (title.includes('Next') || text.includes('Next')) {
-                    if (!btn.disabled) {
-                        btn.click();
-                        return true;
-                    }
-                }
-            }
-            return false;
-        });
-
-        if (clicked) {
-            await page.waitForTimeout(CONFIG.PAGE_LOAD_WAIT);
-            return true;
-        }
-    } catch (e) {
-        log.debug(`JS click failed: ${e.message}`);
-    }
-
-    return false;
+async function getJobCount(page) {
+    return page.evaluate(() =>
+        document.querySelectorAll('.job_result_two_pane_v2').length
+    );
 }
 
 // ============================================================================
 // HELPERS
 // ============================================================================
-
-async function scrollToLoadAll(page) {
-    await page.evaluate(async () => {
-        const container = document.querySelector('.job_results_two_pane');
-        if (!container) return;
-
-        for (let i = 0; i < 3; i++) {
-            container.scrollTop = container.scrollHeight;
-            await new Promise(r => setTimeout(r, 200));
-        }
-        container.scrollTop = 0;
-    }).catch(() => { });
-}
 
 async function dismissPopups(page) {
     const selectors = ['button[aria-label="Close"]', 'button[aria-label="close"]', '.modal-close'];
@@ -244,10 +175,6 @@ async function dismissPopups(page) {
         } catch { /* ignore */ }
     }
 }
-
-const delay = (min, max) => new Promise(r =>
-    setTimeout(r, min + Math.random() * (max - min))
-);
 
 // ============================================================================
 // MAIN
@@ -269,7 +196,7 @@ try {
     const searchUrl = buildSearchUrl(input);
 
     log.info(`🔍 Query: ${input.searchQuery || 'N/A'}`);
-    log.info(`📍 Location: ${input.location || 'Nationwide'}`);
+    log.info(`📍 Location: ${input.location || 'Auto-detect'}`);
     log.info(`🎯 Max Jobs: ${maxJobs}`);
     log.info(`🔗 URL: ${searchUrl}`);
     log.info('───────────────────────────────────────────────────────────────');
@@ -323,9 +250,10 @@ try {
                 await page.waitForTimeout(5000);
             }
 
-            // Wait for jobs
+            // Wait for jobs container
             try {
-                await page.waitForSelector('.job_result_two_pane_v2', { timeout: 30000 });
+                await page.waitForSelector('section.job_results_two_pane', { timeout: 30000 });
+                await page.waitForSelector('.job_result_two_pane_v2', { timeout: 10000 });
                 log.info(`✓ ${title}`);
             } catch {
                 log.error('❌ No jobs found on page');
@@ -336,66 +264,69 @@ try {
 
             await dismissPopups(page);
 
-            // Pagination loop
-            let pageNum = 1;
-            let emptyPages = 0;
+            // Initial job count
+            let lastJobCount = await getJobCount(page);
+            log.info(`📄 Initial: ${lastJobCount} jobs visible`);
 
-            while (totalScraped < maxJobs && pageNum <= CONFIG.MAX_PAGES) {
-                // Scroll to load all jobs
-                await scrollToLoadAll(page);
+            // Infinite scroll loop
+            let staleScrolls = 0;
+            let scrollNum = 0;
 
-                // Extract jobs
-                const jobs = await extractJobs(page);
+            while (totalScraped < maxJobs && scrollNum < CONFIG.MAX_SCROLLS) {
+                scrollNum++;
+                stats.scrollCount++;
 
-                // Dedupe
-                const unique = jobs.filter(job => {
+                // Extract current batch
+                const allJobs = await extractAllJobs(page);
+
+                // Dedupe and get new ones only
+                const newJobs = allJobs.filter(job => {
                     const key = job.jobId || `${job.title}-${job.company}`;
                     if (seenIds.has(key)) {
-                        stats.duplicates++;
                         return false;
                     }
                     seenIds.add(key);
                     return true;
                 });
 
-                stats.pagesProcessed++;
-
-                if (unique.length === 0) {
-                    emptyPages++;
-                    log.info(`📄 Page ${pageNum}: No new jobs (empty: ${emptyPages}/${CONFIG.MAX_EMPTY_PAGES})`);
-                    if (emptyPages >= CONFIG.MAX_EMPTY_PAGES) {
-                        log.info('📭 No more results');
-                        break;
-                    }
-                } else {
-                    emptyPages = 0;
-                    const toSave = unique.slice(0, maxJobs - totalScraped);
+                if (newJobs.length > 0) {
+                    const toSave = newJobs.slice(0, maxJobs - totalScraped);
                     await Actor.pushData(toSave);
                     totalScraped += toSave.length;
                     stats.jobsExtracted += toSave.length;
 
-                    log.info(`📄 Page ${pageNum}: +${toSave.length} jobs | Total: ${totalScraped}/${maxJobs}`);
+                    log.info(`📄 Scroll ${scrollNum}: +${toSave.length} new jobs | Total: ${totalScraped}/${maxJobs}`);
+                    staleScrolls = 0;
+                } else {
+                    staleScrolls++;
+                    log.debug(`Scroll ${scrollNum}: No new jobs (stale: ${staleScrolls})`);
                 }
 
-                // Check limit
+                // Check if we've reached the limit
                 if (totalScraped >= maxJobs) {
                     log.info('🎯 Target reached!');
                     break;
                 }
 
-                // Go to next page
-                log.debug('Attempting to go to next page...');
-                const hasNext = await clickNextPage(page);
-
-                if (!hasNext) {
-                    log.info('📭 No more pages available');
+                // Check if we're stuck
+                if (staleScrolls >= CONFIG.MAX_STALE_SCROLLS) {
+                    log.info('📭 No more jobs loading');
                     break;
                 }
 
-                await dismissPopups(page);
-                await delay(CONFIG.BETWEEN_PAGES_MIN, CONFIG.BETWEEN_PAGES_MAX);
-                pageNum++;
+                // Scroll to load more
+                const scrolled = await scrollToLoadMore(page);
+                await page.waitForTimeout(CONFIG.SCROLL_WAIT);
+
+                // Check if more jobs loaded
+                const currentCount = await getJobCount(page);
+                if (currentCount === lastJobCount && !scrolled) {
+                    staleScrolls++;
+                }
+                lastJobCount = currentCount;
             }
+
+            await dismissPopups(page);
         },
 
         failedRequestHandler({ request, error }) {
@@ -411,15 +342,14 @@ try {
 
     await Actor.setValue('STATISTICS', {
         totalJobsScraped: totalScraped,
-        pagesProcessed: stats.pagesProcessed,
-        duplicatesRemoved: stats.duplicates,
+        scrollsPerformed: stats.scrollCount,
         durationSeconds: duration,
         avgSecondsPerJob: avgPerJob,
     });
 
     log.info('');
     log.info('═══════════════════════════════════════════════════════════════');
-    log.info(`🎉 DONE! ${totalScraped} jobs | ${stats.pagesProcessed} pages | ${duration}s`);
+    log.info(`🎉 DONE! ${totalScraped} jobs | ${stats.scrollCount} scrolls | ${duration}s`);
     if (totalScraped > 0) {
         log.info(`⚡ Speed: ${avgPerJob}s per job`);
     }

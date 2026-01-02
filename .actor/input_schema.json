@@ -21,7 +21,7 @@
         "location": {
             "title": "Location",
             "type": "string",
-            "description": "Location to search for jobs (e.g., 'New York, NY', 'Remote'). Leave empty to search nationwide.",
+            "description": "Location to search for jobs (e.g., 'New York, NY', 'California', 'Remote'). Recommended for best results.",
             "editor": "textfield"
         },
         "maxJobs": {
