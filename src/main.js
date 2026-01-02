@@ -679,20 +679,6 @@ function buildSearchUrl(input) {
         params.append('days', input.daysBack);
     }
 
-    if (input.employmentType && Array.isArray(input.employmentType) && input.employmentType.length > 0) {
-        input.employmentType.forEach(type => {
-            params.append('employment_type', type);
-        });
-    }
-
-    if (input.salaryMin) {
-        params.append('salary_min', input.salaryMin.toString());
-    }
-
-    if (input.remoteOnly) {
-        params.append('remote', '1');
-    }
-
     return `${baseUrl}?${params.toString()}`;
 }
 

@@ -78,37 +78,6 @@
                 "Last 30 days"
             ]
         },
-        "employmentType": {
-            "title": "Employment Type",
-            "type": "array",
-            "description": "Filter by employment type (can select multiple)",
-            "editor": "stringList",
-            "default": [],
-            "placeholderValue": "all types",
-            "items": {
-                "type": "string",
-                "enum": [
-                    "full_time",
-                    "part_time",
-                    "contract",
-                    "temporary",
-                    "internship"
-                ]
-            }
-        },
-        "salaryMin": {
-            "title": "Minimum Salary ($)",
-            "type": "integer",
-            "description": "Minimum annual salary filter (optional)",
-            "minimum": 0,
-            "maximum": 1000000
-        },
-        "remoteOnly": {
-            "title": "Remote Jobs Only",
-            "type": "boolean",
-            "description": "Filter to show only remote positions",
-            "default": false
-        },
         "proxyConfiguration": {
             "title": "Proxy Configuration",
             "type": "object",
