@@ -29,16 +29,10 @@
         "maxJobs": {
             "title": "Maximum Jobs",
             "type": "integer",
-            "description": "Maximum number of job listings to scrape (0 = unlimited). Default is 50 for optimal performance.",
+            "description": "Maximum number of job listings to scrape (0 = unlimited). Default is 50.",
             "default": 50,
             "minimum": 0,
             "maximum": 10000
-        },
-        "enrichDescriptions": {
-            "title": "Fetch Full Descriptions",
-            "type": "boolean",
-            "description": "Click each job to load full description. Set to false for faster scraping without descriptions.",
-            "default": true
         },
         "radius": {
             "title": "Search Radius (miles)",
