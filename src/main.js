@@ -1,9 +1,9 @@
 /**
- * ZipRecruiter Jobs Scraper - Fast & Stealthy
- * Hybrid pagination: Button clicks + Scroll fallback
+ * ZipRecruiter Jobs Scraper - Fast & Reliable
+ * Uses URL-based pagination (?page=X) for reliability
  */
 
-import { PlaywrightCrawler } from '@crawlee/playwright';
+import { PlaywrightCrawler, RequestQueue } from '@crawlee/playwright';
 import { Actor, log } from 'apify';
 import { launchOptions as camoufoxLaunchOptions } from 'camoufox-js';
 import { firefox } from 'playwright';
@@ -11,43 +11,57 @@ import { firefox } from 'playwright';
 await Actor.init();
 
 // ============================================================================
-// CONFIGURATION - Optimized for Speed
+// CONFIGURATION
 // ============================================================================
 const CONFIG = {
-    CLOUDFLARE_WAIT: 4000,      // Reduced for speed
-    PAGE_WAIT: 1200,            // Wait after pagination
-    SCROLL_WAIT: 600,           // Quick scroll wait
+    CLOUDFLARE_WAIT: 4000,
+    CONTENT_WAIT: 1500,
     MAX_PAGES: 50,
-    MAX_EMPTY: 2,
+    JOBS_PER_PAGE: 20,
 };
 
 // ============================================================================
 // STATISTICS
 // ============================================================================
 const stats = {
-    pages: 0,
-    jobs: 0,
+    pagesProcessed: 0,
+    jobsExtracted: 0,
     startTime: Date.now(),
 };
+
+// Track seen job IDs globally
+const seenJobIds = new Set();
 
 // ============================================================================
 // URL BUILDER
 // ============================================================================
 
-function buildSearchUrl(input) {
-    if (input.searchUrl?.trim()) return input.searchUrl.trim();
+function buildSearchUrl(input, pageNum = 1) {
+    let baseUrl;
 
-    const params = new URLSearchParams();
-    if (input.searchQuery?.trim()) params.append('search', input.searchQuery.trim());
-    if (input.location?.trim()) params.append('location', input.location.trim());
-    if (input.radius && input.location?.trim()) params.append('radius', input.radius);
-    if (input.daysBack && input.daysBack !== 'any') params.append('days', input.daysBack);
+    if (input.searchUrl?.trim()) {
+        baseUrl = input.searchUrl.trim();
+    } else {
+        const params = new URLSearchParams();
+        if (input.searchQuery?.trim()) params.append('search', input.searchQuery.trim());
+        if (input.location?.trim()) params.append('location', input.location.trim());
+        if (input.radius && input.location?.trim()) params.append('radius', input.radius);
+        if (input.daysBack && input.daysBack !== 'any') params.append('days', input.daysBack);
+        baseUrl = `https://www.ziprecruiter.com/jobs-search?${params.toString()}`;
+    }
 
-    return `https://www.ziprecruiter.com/jobs-search?${params.toString()}`;
+    // Add page parameter for pagination
+    if (pageNum > 1) {
+        const url = new URL(baseUrl);
+        url.searchParams.set('page', pageNum.toString());
+        return url.toString();
+    }
+
+    return baseUrl;
 }
 
 // ============================================================================
-// JOB EXTRACTION - Fast single pass
+// JOB EXTRACTION
 // ============================================================================
 
 async function extractJobs(page) {
@@ -100,74 +114,6 @@ async function extractJobs(page) {
     });
 }
 
-// ============================================================================
-// PAGINATION - Hybrid: Button + Scroll
-// ============================================================================
-
-async function goNextPage(page) {
-    // Method 1: Try Next button (works on many layouts)
-    try {
-        const nextBtn = await page.$('button[title="Next Page"]:not([disabled])');
-        if (nextBtn) {
-            const isVisible = await nextBtn.isVisible();
-            if (isVisible) {
-                await nextBtn.scrollIntoViewIfNeeded();
-                await nextBtn.click();
-                await page.waitForTimeout(CONFIG.PAGE_WAIT);
-                return true;
-            }
-        }
-    } catch { /* fallback to scroll */ }
-
-    // Method 2: Try pagination links
-    try {
-        const nextLink = await page.$('a[title="Next Page"], a.next-page, [data-testid="next-page"]');
-        if (nextLink) {
-            await nextLink.click();
-            await page.waitForTimeout(CONFIG.PAGE_WAIT);
-            return true;
-        }
-    } catch { /* fallback to scroll */ }
-
-    // Method 3: Scroll the job container to load more
-    try {
-        const countBefore = await page.evaluate(() =>
-            document.querySelectorAll('.job_result_two_pane_v2').length
-        );
-
-        // Scroll the job list container
-        await page.evaluate(() => {
-            const container = document.querySelector('section.job_results_two_pane, .job_results_two_pane');
-            if (container) {
-                container.scrollTop = container.scrollHeight;
-            } else {
-                // Fallback: scroll the page
-                window.scrollTo(0, document.body.scrollHeight);
-            }
-        });
-
-        await page.waitForTimeout(CONFIG.SCROLL_WAIT);
-
-        const countAfter = await page.evaluate(() =>
-            document.querySelectorAll('.job_result_two_pane_v2').length
-        );
-
-        // More jobs loaded?
-        return countAfter > countBefore;
-    } catch {
-        return false;
-    }
-}
-
-async function scrollContainer(page) {
-    await page.evaluate(() => {
-        const container = document.querySelector('section.job_results_two_pane');
-        if (container) {
-            container.scrollTop = container.scrollHeight;
-        }
-    }).catch(() => { });
-}
-
 async function dismissPopups(page) {
     try {
         const btn = await page.$('button[aria-label="Close"]');
@@ -191,12 +137,11 @@ try {
     }
 
     const maxJobs = input.maxJobs ?? 50;
-    const searchUrl = buildSearchUrl(input);
+    const totalPagesNeeded = Math.ceil(maxJobs / CONFIG.JOBS_PER_PAGE);
 
     log.info(`🔍 Query: ${input.searchQuery || 'N/A'}`);
     log.info(`📍 Location: ${input.location || 'Auto'}`);
-    log.info(`🎯 Max Jobs: ${maxJobs}`);
-    log.info(`🔗 ${searchUrl}`);
+    log.info(`🎯 Max Jobs: ${maxJobs} (${totalPagesNeeded} pages)`);
     log.info('───────────────────────────────────────────────────────────────');
 
     const proxyConfiguration = await Actor.createProxyConfiguration(
@@ -204,15 +149,17 @@ try {
     );
     const proxyUrl = await proxyConfiguration.newUrl();
 
-    const seenIds = new Set();
     let totalScraped = 0;
+    let currentPage = 1;
+    let consecutiveEmpty = 0;
 
+    // Create crawler
     const crawler = new PlaywrightCrawler({
         proxyConfiguration,
-        maxRequestsPerCrawl: 1,
+        maxRequestsPerCrawl: Math.min(totalPagesNeeded + 5, CONFIG.MAX_PAGES),
         maxConcurrency: 1,
         navigationTimeoutSecs: 45,
-        requestHandlerTimeoutSecs: 300,
+        requestHandlerTimeoutSecs: 120,
 
         launchContext: {
             launcher: firefox,
@@ -234,8 +181,10 @@ try {
             });
         }],
 
-        async requestHandler({ page }) {
-            log.info('✓ Page loaded');
+        async requestHandler({ page, request }) {
+            const pageNum = request.userData.pageNum || 1;
+
+            log.info(`📄 Loading page ${pageNum}...`);
             await page.waitForTimeout(CONFIG.CLOUDFLARE_WAIT);
 
             const title = await page.title();
@@ -243,96 +192,95 @@ try {
                 await page.waitForTimeout(4000);
             }
 
+            // Wait for job container
             try {
                 await page.waitForSelector('.job_result_two_pane_v2', { timeout: 20000 });
-                log.info(`✓ ${title}`);
             } catch {
-                log.error('❌ No jobs found');
-                await Actor.setValue('DEBUG', await page.content(), { contentType: 'text/html' });
+                log.warning(`Page ${pageNum}: No jobs found`);
+                consecutiveEmpty++;
+
+                if (pageNum === 1) {
+                    await Actor.setValue('DEBUG', await page.content(), { contentType: 'text/html' });
+                }
                 return;
             }
 
             await dismissPopups(page);
-            await scrollContainer(page);
+            await page.waitForTimeout(CONFIG.CONTENT_WAIT);
 
-            let pageNum = 1;
-            let emptyCount = 0;
+            // Extract jobs
+            const jobs = await extractJobs(page);
+            stats.pagesProcessed++;
 
-            while (totalScraped < maxJobs && pageNum <= CONFIG.MAX_PAGES) {
-                // Extract all visible jobs
-                const jobs = await extractJobs(page);
+            // Deduplicate
+            const newJobs = jobs.filter(job => {
+                const key = job.jobId || `${job.title}-${job.company}`;
+                if (seenJobIds.has(key)) return false;
+                seenJobIds.add(key);
+                return true;
+            });
 
-                // Filter to new ones only
-                const newJobs = jobs.filter(j => {
-                    const key = j.jobId || `${j.title}-${j.company}`;
-                    if (seenIds.has(key)) return false;
-                    seenIds.add(key);
-                    return true;
-                });
+            if (newJobs.length === 0) {
+                log.info(`📄 Page ${pageNum}: No new jobs`);
+                consecutiveEmpty++;
+            } else {
+                consecutiveEmpty = 0;
+                const toSave = newJobs.slice(0, maxJobs - totalScraped);
+                await Actor.pushData(toSave);
+                totalScraped += toSave.length;
+                stats.jobsExtracted += toSave.length;
+                log.info(`📄 Page ${pageNum}: +${toSave.length} jobs | Total: ${totalScraped}/${maxJobs}`);
+            }
 
-                stats.pages++;
+            // Check if we should continue
+            if (totalScraped >= maxJobs) {
+                log.info('🎯 Target reached!');
+                return;
+            }
 
-                if (newJobs.length === 0) {
-                    emptyCount++;
-                    if (emptyCount >= CONFIG.MAX_EMPTY) {
-                        log.info('📭 End of results');
-                        break;
-                    }
-                } else {
-                    emptyCount = 0;
-                    const toSave = newJobs.slice(0, maxJobs - totalScraped);
-                    await Actor.pushData(toSave);
-                    totalScraped += toSave.length;
-                    stats.jobs += toSave.length;
-                    log.info(`📄 Page ${pageNum}: +${toSave.length} | Total: ${totalScraped}/${maxJobs}`);
-                }
+            if (consecutiveEmpty >= 2) {
+                log.info('📭 No more results');
+                return;
+            }
 
-                if (totalScraped >= maxJobs) {
-                    log.info('🎯 Target reached!');
-                    break;
-                }
-
-                // Try to get more jobs
-                const hasMore = await goNextPage(page);
-                if (!hasMore) {
-                    // Try one more scroll
-                    await scrollContainer(page);
-                    await page.waitForTimeout(CONFIG.SCROLL_WAIT);
-
-                    const moreJobs = await extractJobs(page);
-                    const newAfterScroll = moreJobs.filter(j => !seenIds.has(j.jobId || `${j.title}-${j.company}`));
-
-                    if (newAfterScroll.length === 0) {
-                        log.info('📭 No more pages');
-                        break;
-                    }
-                }
-
-                await dismissPopups(page);
-                pageNum++;
+            // Add next page to queue if needed
+            const nextPage = pageNum + 1;
+            if (nextPage <= CONFIG.MAX_PAGES && totalScraped < maxJobs) {
+                const nextUrl = buildSearchUrl(input, nextPage);
+                await crawler.addRequests([{
+                    url: nextUrl,
+                    userData: { pageNum: nextPage },
+                }]);
             }
         },
 
-        failedRequestHandler({ error }) {
-            log.error(`❌ ${error.message}`);
+        failedRequestHandler({ request, error }) {
+            log.error(`❌ Page ${request.userData.pageNum || 1} failed: ${error.message}`);
         },
     });
 
-    await crawler.run([searchUrl]);
+    // Start with page 1
+    const startUrl = buildSearchUrl(input, 1);
+    await crawler.run([{
+        url: startUrl,
+        userData: { pageNum: 1 },
+    }]);
 
+    // Final stats
     const duration = Math.round((Date.now() - stats.startTime) / 1000);
     const speed = totalScraped > 0 ? (duration / totalScraped).toFixed(2) : 'N/A';
 
     await Actor.setValue('STATISTICS', {
         jobs: totalScraped,
-        pages: stats.pages,
+        pages: stats.pagesProcessed,
         duration: `${duration}s`,
         speed: `${speed}s/job`,
     });
 
     log.info('');
     log.info('═══════════════════════════════════════════════════════════════');
-    log.info(`🎉 DONE! ${totalScraped} jobs | ${stats.pages} pages | ${duration}s (${speed}s/job)`);
+    log.info(`🎉 DONE! ${totalScraped} jobs | ${stats.pagesProcessed} pages | ${duration}s`);
+    if (totalScraped > 0) log.info(`⚡ Speed: ${speed}s/job`);
     log.info('═══════════════════════════════════════════════════════════════');
 
 } catch (error) {
