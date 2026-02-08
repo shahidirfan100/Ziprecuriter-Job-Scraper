@@ -35,28 +35,14 @@
             "minimum": 0,
             "maximum": 10000
         },
-        "radius": {
-            "title": "Search Radius (miles)",
-            "type": "string",
-            "description": "Distance from location to search within",
-            "default": "25",
-            "prefill": "25",
-            "enum": [
-                "5",
-                "10",
-                "15",
-                "25",
-                "50",
-                "100"
-            ],
-            "enumTitles": [
-                "5 miles",
-                "10 miles",
-                "15 miles",
-                "25 miles",
-                "50 miles",
-                "100 miles"
-            ]
+        "maxPages": {
+            "title": "Maximum Pages",
+            "type": "integer",
+            "description": "Maximum number of result pages to scan. Used as a safety cap, especially when maxJobs is 0 (unlimited).",
+            "default": 50,
+            "prefill": 50,
+            "minimum": 1,
+            "maximum": 200
         },
         "daysBack": {
             "title": "Posted Within (Days)",

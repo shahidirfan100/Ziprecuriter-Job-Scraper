@@ -1,316 +1,252 @@
 # ZipRecruiter Jobs Scraper
 
-Extract thousands of job listings from ZipRecruiter in minutes. Get structured job data including titles, companies, salaries, locations, and direct application links. Perfect for recruitment agencies, job aggregators, HR analytics, and market research.
+Extract and collect ZipRecruiter job listings into structured datasets for analysis, research, and automation. Gather job titles, companies, locations, salary information, full descriptions, and apply links at scale. This actor is built for fast, reliable job data collection workflows.
 
-## What does ZipRecruiter Jobs Scraper do?
+## Features
 
-ZipRecruiter Jobs Scraper is an automated data extraction tool that collects job posting information from ZipRecruiter.com - one of America's leading job marketplaces with millions of active listings.
+- **Comprehensive Job Data** — Collect detailed listing records including job content, compensation fields, and metadata.
+- **Flexible Search Inputs** — Start from a direct search URL or use keywords and location.
+- **Automatic Pagination** — Continue across result pages until you hit your limits.
+- **Freshness Filtering** — Restrict results to recent postings using a day-range filter.
+- **Structured Exports** — Use JSON, CSV, Excel, and other dataset export formats.
+- **Automation Ready** — Run manually, on schedule, or through API integrations.
 
-This scraper enables you to:
+## Use Cases
 
-- **Collect job listings at scale** - Gather hundreds or thousands of job postings in a single run
-- **Search by keywords and location** - Target specific job titles, skills, or geographic areas
-- **Filter by posting date** - Focus on fresh job listings posted within your timeframe
-- **Export structured data** - Download clean, organized data in JSON, CSV, Excel, or other formats
-- **Automate job monitoring** - Schedule regular runs to track new opportunities
+### Recruitment Pipeline Enrichment
+Collect targeted job datasets by role and location to enrich recruiting workflows. Track openings from specific regions or categories and sync data downstream.
 
-## Why scrape ZipRecruiter?
+### Job Market Intelligence
+Analyze hiring demand by title, location, compensation range, and posting recency. Use the data for reporting, trend analysis, and competitive monitoring.
 
-ZipRecruiter aggregates job postings from over 100 job boards and company career pages. Extracting this data allows you to:
+### Lead Generation for B2B Services
+Find companies actively hiring in your service niche and create prospect lists. Use job activity as an intent signal for outreach campaigns.
 
-- Build comprehensive job databases for your platform
-- Monitor hiring trends across industries and locations
-- Analyze salary ranges and compensation patterns
-- Track competitor hiring activities
-- Provide fresh job opportunities to candidates
-- Research employment markets for business intelligence
+### Career Research and Content
+Gather current job trends for salary guides, skills reports, and job-seeker resources. Build data-backed insights from recent posting activity.
 
-## How to use ZipRecruiter Jobs Scraper
+### Internal BI and Dashboards
+Feed datasets into warehouse or BI tools for recurring reporting. Monitor role distribution, market shifts, and hiring spikes over time.
 
-### Step 1: Configure your search
+---
 
-You can search for jobs in two ways:
+## Input Parameters
 
-**Option A: Use search parameters**
+| Parameter | Type | Required | Default | Description |
+|-----------|------|----------|---------|-------------|
+| `searchUrl` | String | No | — | Direct ZipRecruiter search URL. When provided, it overrides search query and location fields. |
+| `searchQuery` | String | No | `"software engineer"` | Keywords or job title to search for. Required when `searchUrl` is not provided. |
+| `location` | String | No | `"New York, NY"` | Target location for search results. |
+| `maxJobs` | Integer | No | `20` | Maximum number of jobs to collect. Use `0` for unlimited until other limits are reached. |
+| `maxPages` | Integer | No | `50` | Maximum number of result pages to process. |
+| `daysBack` | String | No | `"any"` | Posting recency filter. Allowed values: `any`, `1`, `3`, `7`, `14`, `30`. |
+| `proxyConfiguration` | Object | No | Residential proxy preset | Proxy configuration for reliable collection. |
 
-Enter your desired job title/keywords and location:
+---
+
+## Output Data
+
+Each dataset item contains job listing data like:
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `title` | String | Job title. |
+| `company` | String | Company display name. |
+| `companyCanonicalName` | String | Canonical company name when available. |
+| `companyId` | String | Company identifier when available. |
+| `companyUrl` | String | Company page URL. |
+| `companyLogoUrl` | String | Company logo URL. |
+| `location` | String | Display location text. |
+| `locationCity` | String | City value. |
+| `locationState` | String | State value. |
+| `locationStateCode` | String | State code value. |
+| `locationCountry` | String | Country value. |
+| `locationCountryCode` | String | Country code value. |
+| `isRemote` | Boolean | Indicates remote classification. |
+| `locationTypes` | Array | Location type labels. |
+| `employmentTypes` | Array | Employment type labels. |
+| `jobType` | String | Combined employment type string. |
+| `salary` | String | Human-readable salary summary. |
+| `salaryMin` | Number | Minimum salary when available. |
+| `salaryMax` | Number | Maximum salary when available. |
+| `salaryMinAnnual` | Number | Annualized minimum salary when available. |
+| `salaryMaxAnnual` | Number | Annualized maximum salary when available. |
+| `salaryInterval` | String | Salary interval value. |
+| `salaryCurrency` | String | Salary currency code. |
+| `postedDate` | String | Posting date value. |
+| `postedAtUtc` | String | UTC posting timestamp. |
+| `rollingPostedAtUtc` | String | Rolling UTC posting timestamp. |
+| `isActive` | Boolean | Listing active flag when available. |
+| `url` | String | Job URL. |
+| `externalApplyUrl` | String | External apply URL when available. |
+| `applyButtonType` | String | Apply button type value. |
+| `applyDestination` | String | Apply destination value. |
+| `applyStatus` | String/Null | Apply status value when available. |
+| `listingKey` | String | Listing key identifier. |
+| `matchId` | String | Match identifier. |
+| `jobId` | String | Job identifier. |
+| `openSeatId` | String | Open seat identifier when available. |
+| `description` | String | Full job description text. |
+| `shortDescription` | String | Short listing summary text. |
+| `htmlDescription` | String | Rich description content when available. |
+| `searchQuery` | String | Input keyword used in the run. |
+| `searchLocation` | String | Input location used in the run. |
+| `page` | Number | Results page number. |
+| `scrapedAt` | String | Extraction timestamp. |
+| `rawCard` | Object | Raw listing payload. |
+| `rawDetails` | Object | Raw detailed payload. |
+
+---
+
+## Usage Examples
+
+### Basic Keyword Search
+
+Collect software engineering jobs in New York:
 
 ```json
 {
     "searchQuery": "software engineer",
     "location": "New York, NY",
-    "maxJobs": 100
+    "maxJobs": 50
 }
 ```
 
-**Option B: Use a direct search URL**
+### Direct Search URL
 
-Copy a search URL from ZipRecruiter.com:
+Use a ZipRecruiter search URL directly:
 
 ```json
 {
     "searchUrl": "https://www.ziprecruiter.com/jobs-search?search=data+analyst&location=Remote",
-    "maxJobs": 200
-}
-```
-
-### Step 2: Run the scraper
-
-Click **Start** to begin extracting job listings. The scraper will automatically:
-
-1. Navigate to ZipRecruiter and execute your search
-2. Extract all job listings from the search results
-3. Paginate through multiple pages to collect more jobs
-4. Save structured data to your dataset
-
-### Step 3: Export your data
-
-Once complete, download your job data in your preferred format:
-
-- **JSON** - Structured data for applications and APIs
-- **CSV** - Compatible with Excel and Google Sheets
-- **Excel** - Ready for analysis and reporting
-- **XML** - Enterprise system integration
-
-## Input parameters
-
-<table>
-<thead>
-<tr>
-<th>Parameter</th>
-<th>Type</th>
-<th>Description</th>
-</tr>
-</thead>
-<tbody>
-<tr>
-<td><code>searchUrl</code></td>
-<td>String</td>
-<td>Direct ZipRecruiter search URL. Overrides other search parameters if provided.</td>
-</tr>
-<tr>
-<td><code>searchQuery</code></td>
-<td>String</td>
-<td>Job title or keywords to search for (e.g., "software engineer", "marketing manager").</td>
-</tr>
-<tr>
-<td><code>location</code></td>
-<td>String</td>
-<td>City, state, or "Remote" (e.g., "San Francisco, CA", "Chicago, IL").</td>
-</tr>
-<tr>
-<td><code>maxJobs</code></td>
-<td>Integer</td>
-<td>Maximum number of job listings to extract. Default: 50.</td>
-</tr>
-<tr>
-<td><code>radius</code></td>
-<td>String</td>
-<td>Search radius in miles: 5, 10, 15, 25, 50, or 100.</td>
-</tr>
-<tr>
-<td><code>daysBack</code></td>
-<td>String</td>
-<td>Filter by posting date: any, 1, 3, 7, 14, or 30 days.</td>
-</tr>
-<tr>
-<td><code>proxyConfiguration</code></td>
-<td>Object</td>
-<td>Proxy settings. Residential proxies recommended for best results.</td>
-</tr>
-</tbody>
-</table>
-
-**Note:** Either `searchUrl` OR `searchQuery`/`location` is required.
-
-## Output data
-
-Each extracted job listing contains the following information:
-
-```json
-{
-    "title": "Senior Software Engineer",
-    "company": "Tech Solutions Inc",
-    "companyUrl": "https://www.ziprecruiter.com/co/tech-solutions",
-    "location": "New York, NY (Remote)",
-    "salary": "$120,000 - $180,000 per year",
-    "jobType": "Full-time",
-    "postedDate": "2 days ago",
-    "url": "https://www.ziprecruiter.com/jobs/abc123xyz",
-    "jobId": "abc123xyz",
-    "scrapedAt": "2026-01-15T10:30:00.000Z"
-}
-```
-
-### Output fields explained
-
-<table>
-<thead>
-<tr>
-<th>Field</th>
-<th>Description</th>
-</tr>
-</thead>
-<tbody>
-<tr>
-<td><code>title</code></td>
-<td>Job position title</td>
-</tr>
-<tr>
-<td><code>company</code></td>
-<td>Name of the hiring company</td>
-</tr>
-<tr>
-<td><code>companyUrl</code></td>
-<td>Link to company profile on ZipRecruiter</td>
-</tr>
-<tr>
-<td><code>location</code></td>
-<td>Job location including remote work indicator if applicable</td>
-</tr>
-<tr>
-<td><code>salary</code></td>
-<td>Salary range when provided by employer</td>
-</tr>
-<tr>
-<td><code>jobType</code></td>
-<td>Employment type (Full-time, Part-time, Contract, etc.)</td>
-</tr>
-<tr>
-<td><code>postedDate</code></td>
-<td>When the job was posted (e.g., "3 days ago")</td>
-</tr>
-<tr>
-<td><code>url</code></td>
-<td>Direct link to job posting</td>
-</tr>
-<tr>
-<td><code>jobId</code></td>
-<td>Unique job identifier</td>
-</tr>
-<tr>
-<td><code>scrapedAt</code></td>
-<td>Timestamp when data was extracted</td>
-</tr>
-</tbody>
-</table>
-
-## Use cases
-
-### For recruitment agencies
-
-Automate candidate sourcing by extracting fresh job listings daily. Match candidates to opportunities faster with automated data collection across multiple locations and industries.
-
-### For job aggregation platforms
-
-Build comprehensive job databases by collecting listings from ZipRecruiter. Combine with data from other sources to offer users the most complete job search experience.
-
-### For HR and talent analytics
-
-Track hiring trends, analyze salary ranges by location and role, and monitor competitor hiring activities. Make data-driven decisions with comprehensive employment market data.
-
-### For career services
-
-Provide job seekers with curated, up-to-date opportunities. Filter by location, salary, and job type to match candidates with their ideal positions.
-
-### For market research
-
-Analyze employment markets, identify in-demand skills, and understand industry hiring patterns. Export data for custom analysis and reporting.
-
-## Input examples
-
-### Remote tech jobs
-
-```json
-{
-    "searchQuery": "python developer",
-    "location": "Remote",
     "maxJobs": 100,
-    "daysBack": "7"
+    "maxPages": 20
 }
 ```
 
-### Healthcare positions in Texas
+### Recent Jobs with Proxy Configuration
+
+Focus on fresh jobs and use proxy settings:
 
 ```json
 {
-    "searchQuery": "registered nurse",
-    "location": "Texas",
+    "searchQuery": "product manager",
+    "location": "California",
+    "daysBack": "7",
     "maxJobs": 200,
-    "radius": "50"
+    "maxPages": 50,
+    "proxyConfiguration": {
+        "useApifyProxy": true,
+        "apifyProxyGroups": ["RESIDENTIAL"]
+    }
 }
 ```
 
-### Recent finance jobs in New York
+---
+
+## Sample Output
 
 ```json
 {
-    "searchQuery": "financial analyst",
-    "location": "New York, NY",
-    "maxJobs": 150,
-    "daysBack": "3",
-    "radius": "25"
+    "title": "Software Engineer, Observability",
+    "company": "CoreWeave",
+    "location": "New York, NY US",
+    "jobType": "Full-time",
+    "salary": "$109,000 - $145,000 / year",
+    "postedAtUtc": "2026-02-05T17:18:00Z",
+    "url": "https://www.ziprecruiter.com/c/CoreWeave/Job/Software-Engineer,-Observability/-in-New-York,NY?jid=example",
+    "externalApplyUrl": "https://coreweave.com/careers/jobs/example",
+    "listingKey": "exampleListingKey",
+    "matchId": "exampleMatchId",
+    "isRemote": false,
+    "description": "We are looking for a software engineer to build and scale observability services...",
+    "searchQuery": "software engineer",
+    "searchLocation": "New York, NY",
+    "page": 1,
+    "scrapedAt": "2026-02-08T14:15:28.000Z"
 }
 ```
 
-### Entry-level marketing positions
+---
 
-```json
-{
-    "searchQuery": "marketing coordinator",
-    "location": "Los Angeles, CA",
-    "maxJobs": 75,
-    "radius": "25"
-}
-```
+## Tips for Best Results
 
-## Tips for best results
+### Start with Tight Searches
+- Use specific keywords to reduce irrelevant results.
+- Narrow by location when possible for cleaner datasets.
 
-1. **Use specific search terms** - More targeted keywords return more relevant results
-2. **Set appropriate limits** - Start with smaller maxJobs values to test your search
-3. **Filter by date** - Use daysBack to focus on fresh listings
-4. **Use residential proxies** - Required for reliable data extraction
-5. **Schedule regular runs** - Set up recurring schedules to monitor new job postings
+### Control Volume Intentionally
+- Start with `maxJobs` 20-100 for test runs.
+- Increase `maxPages` and `maxJobs` for production runs.
+
+### Use Recency Filters
+- Set `daysBack` to `1`, `3`, or `7` for fresher monitoring workflows.
+- Use `any` when building historical-style snapshots.
+
+### Keep Proxy Enabled
+- Use residential proxy settings for stronger reliability.
+- Keep proxy configuration consistent for scheduled runs.
+
+### Schedule for Monitoring
+- Run daily or hourly schedules to detect new listings quickly.
+- Connect runs to notifications or downstream automations.
+
+---
 
 ## Integrations
 
-Connect ZipRecruiter Jobs Scraper to your workflow:
+Connect extracted data to:
 
-- **Webhooks** - Receive notifications when scraping completes
-- **API access** - Integrate with your applications via Apify API
-- **Scheduled runs** - Automate daily, weekly, or custom schedules
-- **Dataset exports** - Direct links to download extracted data
+- **Google Sheets** — Share and analyze job datasets quickly.
+- **Airtable** — Build searchable recruiting and market tables.
+- **Slack** — Send run notifications to your team.
+- **Webhooks** — Trigger custom backend workflows after each run.
+- **Make** — Build no-code pipelines and enrichment flows.
+- **Zapier** — Connect jobs data to business apps automatically.
 
-## Frequently asked questions
+### Export Formats
 
-### How many jobs can I extract?
+- **JSON** — API and engineering workflows.
+- **CSV** — Spreadsheet analysis and reporting.
+- **Excel** — Business-ready reports.
+- **XML** — System-to-system integrations.
 
-You can extract thousands of job listings in a single run. Set the `maxJobs` parameter to control the number of listings collected.
+---
 
-### How fresh is the data?
+## Frequently Asked Questions
 
-Data is extracted in real-time directly from ZipRecruiter. Use the `daysBack` filter to focus on recently posted jobs.
+### Do I need both `searchUrl` and `searchQuery`?
+No. Use either `searchUrl` or `searchQuery` (with optional `location`).
 
-### What proxy should I use?
+### How many jobs can I collect?
+Set `maxJobs` to your target value. If set to `0`, collection continues until page limits or result availability stops it.
 
-Residential proxies are recommended for best results. The default configuration uses Apify's residential proxy network.
+### Can I collect only recent jobs?
+Yes. Use `daysBack` with values like `1`, `3`, `7`, `14`, or `30`.
 
-### Can I schedule regular runs?
+### Why are some fields empty?
+Some listings do not expose every field. Missing values are returned as empty or null depending on field type.
 
-Yes, you can set up scheduled runs to automatically collect new job listings on a daily, weekly, or custom basis.
+### Can I automate this actor?
+Yes. You can run it on schedules, call it through API, and send results to downstream tools.
 
-### What export formats are supported?
+### Is output available as CSV and Excel?
+Yes. You can export dataset items in CSV, Excel, JSON, and additional formats from Apify.
 
-Export your data in JSON, CSV, Excel (XLSX), XML, RSS, or HTML format directly from the Apify Console.
+---
 
 ## Support
 
-If you have questions or need assistance:
+For issues or feature requests, use the Apify Console issue/support channels for this actor.
 
-- Check the input parameters and examples above
-- Review the output data format
-- Contact support through Apify Console
+### Resources
 
-## Legal and compliance
+- [Apify Documentation](https://docs.apify.com/)
+- [Apify API Reference](https://docs.apify.com/api/v2)
+- [Apify Schedules](https://docs.apify.com/platform/schedules)
 
-This scraper collects only publicly available job listing information. Users are responsible for ensuring their use complies with applicable laws and ZipRecruiter's terms of service.
+---
+
+## Legal Notice
+
+This actor is intended for legitimate data collection and research use. You are responsible for complying with applicable laws, platform terms, and data usage policies in your jurisdiction.

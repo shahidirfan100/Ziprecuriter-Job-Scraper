@@ -1,21 +1,146 @@
 {
     "actorSpecification": 1,
-    "fields": {},
+    "fields": {
+        "type": "object",
+        "properties": {
+            "title": {
+                "title": "Job Title",
+                "type": "string"
+            },
+            "company": {
+                "title": "Company",
+                "type": "string"
+            },
+            "location": {
+                "title": "Location",
+                "type": "string"
+            },
+            "jobType": {
+                "title": "Job Type",
+                "type": "string"
+            },
+            "salary": {
+                "title": "Salary",
+                "type": "string"
+            },
+            "postedDate": {
+                "title": "Posted Date",
+                "type": "string"
+            },
+            "url": {
+                "title": "Job URL",
+                "type": "string"
+            },
+            "externalApplyUrl": {
+                "title": "External Apply URL",
+                "type": "string"
+            },
+            "companyUrl": {
+                "title": "Company URL",
+                "type": "string"
+            },
+            "companyLogoUrl": {
+                "title": "Company Logo",
+                "type": "string"
+            },
+            "description": {
+                "title": "Description",
+                "type": "string"
+            },
+            "shortDescription": {
+                "title": "Short Description",
+                "type": "string"
+            },
+            "listingKey": {
+                "title": "Listing Key",
+                "type": "string"
+            },
+            "matchId": {
+                "title": "Match ID",
+                "type": "string"
+            },
+            "openSeatId": {
+                "title": "Open Seat ID",
+                "type": "string"
+            },
+            "employmentTypes": {
+                "title": "Employment Types",
+                "type": "array"
+            },
+            "locationTypes": {
+                "title": "Location Types",
+                "type": "array"
+            },
+            "isRemote": {
+                "title": "Remote",
+                "type": "boolean"
+            },
+            "salaryMin": {
+                "title": "Salary Min",
+                "type": "number"
+            },
+            "salaryMax": {
+                "title": "Salary Max",
+                "type": "number"
+            },
+            "salaryInterval": {
+                "title": "Salary Interval",
+                "type": "string"
+            },
+            "salaryCurrency": {
+                "title": "Salary Currency",
+                "type": "string"
+            },
+            "postedAtUtc": {
+                "title": "Posted At UTC",
+                "type": "string"
+            },
+            "rollingPostedAtUtc": {
+                "title": "Rolling Posted At UTC",
+                "type": "string"
+            },
+            "isActive": {
+                "title": "Active",
+                "type": "boolean"
+            },
+            "page": {
+                "title": "Result Page",
+                "type": "number"
+            },
+            "scrapedAt": {
+                "title": "Scraped At",
+                "type": "string"
+            },
+            "rawCard": {
+                "title": "Raw Card",
+                "type": "object"
+            },
+            "rawDetails": {
+                "title": "Raw Details",
+                "type": "object"
+            }
+        }
+    },
     "views": {
         "overview": {
             "title": "ZipRecruiter Job Listings",
-            "description": "Complete view of all scraped ZipRecruiter job listings with details",
+            "description": "API-first job listings with enriched details and fallback metadata",
             "transformation": {
                 "fields": [
                     "title",
                     "company",
                     "location",
-                    "salary",
                     "jobType",
+                    "salary",
                     "postedDate",
                     "url",
+                    "externalApplyUrl",
                     "companyUrl",
-                    "jobId",
+                    "listingKey",
+                    "matchId",
+                    "isRemote",
+                    "isActive",
+                    "page",
                     "scrapedAt"
                 ]
             },
@@ -34,12 +159,12 @@
                         "label": "Location",
                         "format": "text"
                     },
-                    "salary": {
-                        "label": "Salary",
-                        "format": "text"
-                    },
                     "jobType": {
                         "label": "Job Type",
+                        "format": "text"
+                    },
+                    "salary": {
+                        "label": "Salary",
                         "format": "text"
                     },
                     "postedDate": {
@@ -50,13 +175,33 @@
                         "label": "Job URL",
                         "format": "link"
                     },
+                    "externalApplyUrl": {
+                        "label": "Apply URL",
+                        "format": "link"
+                    },
                     "companyUrl": {
                         "label": "Company URL",
                         "format": "link"
                     },
-                    "jobId": {
-                        "label": "Job ID",
+                    "listingKey": {
+                        "label": "Listing Key",
                         "format": "text"
+                    },
+                    "matchId": {
+                        "label": "Match ID",
+                        "format": "text"
+                    },
+                    "isRemote": {
+                        "label": "Remote",
+                        "format": "boolean"
+                    },
+                    "isActive": {
+                        "label": "Active",
+                        "format": "boolean"
+                    },
+                    "page": {
+                        "label": "Page",
+                        "format": "number"
                     },
                     "scrapedAt": {
                         "label": "Scraped At",
