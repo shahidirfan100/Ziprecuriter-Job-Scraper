@@ -13,6 +13,7 @@ const CONFIG = {
     MAX_PAGES_HARD_LIMIT: 200,
     DETAIL_CONCURRENCY: 3,
 };
+const DEFAULT_SEARCH_QUERY = 'software engineer';
 
 const stats = {
     pagesProcessed: 0,
@@ -124,6 +125,11 @@ function normalizeTypedNames(items) {
         .map((name) => name.trim());
 }
 
+function normalizeInputString(value) {
+    if (typeof value !== 'string') return '';
+    return value.trim();
+}
+
 function sanitizeRecordForDataset(record) {
     if (!record || typeof record !== 'object') return null;
 
@@ -224,6 +230,68 @@ async function extractModelFromJsVariables(page) {
 
     if (!raw) return null;
     return safeJsonParse(raw, null);
+}
+
+async function fetchModelFromSearchPageViaSession(page, targetUrl) {
+    const result = await page.evaluate(async ({ url }) => {
+        try {
+            const response = await fetch(url, {
+                method: 'GET',
+                credentials: 'include',
+                headers: {
+                    accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+                },
+            });
+            const html = await response.text();
+            const doc = new DOMParser().parseFromString(html, 'text/html');
+            const raw = doc.querySelector('#js_variables')?.textContent || '';
+            const challenge = /just a moment|cloudflare/i.test(html);
+
+            return {
+                ok: response.ok,
+                status: response.status,
+                raw,
+                challenge,
+            };
+        } catch (error) {
+            return {
+                ok: false,
+                status: 0,
+                raw: '',
+                challenge: false,
+                error: String(error),
+            };
+        }
+    }, { url: targetUrl });
+
+    if (!result.ok || !result.raw) {
+        return {
+            ok: false,
+            status: result.status,
+            challenge: Boolean(result.challenge),
+            error: result.error || 'No js_variables in session fetch response',
+            modelData: null,
+        };
+    }
+
+    const model = safeJsonParse(result.raw, null);
+    if (!model) {
+        return {
+            ok: false,
+            status: result.status,
+            challenge: Boolean(result.challenge),
+            error: 'Failed to parse js_variables JSON from session fetch response',
+            modelData: null,
+        };
+    }
+
+    return {
+        ok: true,
+        status: result.status,
+        challenge: false,
+        error: '',
+        modelData: parseApiDataFromModel(model),
+    };
 }
 
 function parseApiDataFromModel(model) {
@@ -538,9 +606,21 @@ async function extractJobsByDomFallback(page) {
 try {
     const input = (await Actor.getInput()) || {};
 
-    if (!input.searchUrl?.trim() && !input.searchQuery?.trim()) {
-        throw new Error('Provide "searchUrl" OR "searchQuery"');
-    }
+    const rawSearchUrl = normalizeInputString(input.searchUrl);
+    const rawSearchQuery = normalizeInputString(input.searchQuery);
+    const rawLocation = normalizeInputString(input.location);
+
+    const hasExplicitFilters = Boolean(rawSearchQuery || rawLocation);
+    const hasSearchUrl = Boolean(rawSearchUrl);
+    const useSearchUrl = hasSearchUrl && !hasExplicitFilters;
+    const useDefaultQuery = !useSearchUrl && !rawSearchQuery && !rawLocation;
+
+    const effectiveSearch = {
+        searchUrl: useSearchUrl ? rawSearchUrl : '',
+        searchQuery: rawSearchQuery || (useDefaultQuery ? DEFAULT_SEARCH_QUERY : ''),
+        location: rawLocation,
+        daysBack: input.daysBack,
+    };
 
     const maxJobsInput = Number(input.maxJobs ?? 20);
     const targetJobs = maxJobsInput > 0 ? maxJobsInput : Number.POSITIVE_INFINITY;
@@ -561,8 +641,9 @@ try {
     const proxyUrl = await proxyConfiguration?.newUrl();
 
     log.info('Starting ZipRecruiter actor in API-first mode', {
-        searchQuery: input.searchQuery || null,
-        location: input.location || null,
+        searchQuery: effectiveSearch.searchQuery || null,
+        location: effectiveSearch.location || null,
+        usingSearchUrl: Boolean(effectiveSearch.searchUrl),
         maxJobs: Number.isFinite(targetJobs) ? targetJobs : 0,
         maxPages,
     });
@@ -572,7 +653,7 @@ try {
 
     const crawler = new PlaywrightCrawler({
         proxyConfiguration,
-        maxRequestsPerCrawl: maxPages,
+        maxRequestsPerCrawl: 1,
         maxConcurrency: 1,
         maxRequestRetries: 2,
         navigationTimeoutSecs: 90,
@@ -636,10 +717,8 @@ try {
             },
         ],
 
-        async requestHandler({ page, request }) {
-            const pageNum = Number(request.userData.pageNum) || 1;
-            const remainingSlots = Number.isFinite(targetJobs) ? Math.max(targetJobs - totalScraped, 0) : Number.POSITIVE_INFINITY;
-            if (remainingSlots === 0) return;
+        async requestHandler({ page }) {
+            if (Number.isFinite(targetJobs) && totalScraped >= targetJobs) return;
 
             const apiCapture = {
                 hydratedCards: [],
@@ -679,124 +758,161 @@ try {
                 await dismissPopups(page);
                 await page.waitForSelector('#js_variables', { timeout: 12000 }).catch(() => {});
 
-                let records = [];
-                let usedDomFallback = false;
+                const initialModel = await extractModelFromJsVariables(page);
+                const initialModelData = parseApiDataFromModel(initialModel);
 
-                const model = await extractModelFromJsVariables(page);
-                const modelData = parseApiDataFromModel(model);
-                const apiMaxPages = modelData.maxPages && modelData.maxPages > 0
-                    ? Math.min(modelData.maxPages, maxPages)
+                let apiMaxPages = initialModelData.maxPages && initialModelData.maxPages > 0
+                    ? Math.min(initialModelData.maxPages, maxPages)
                     : maxPages;
 
-                let { jobCards } = modelData;
-                const keyMap = new Map(modelData.jobKeys.map((jobKey) => [jobKey.listingKey, jobKey]));
+                for (let pageNum = 1; pageNum <= apiMaxPages; pageNum += 1) {
+                    const remainingSlots = Number.isFinite(targetJobs)
+                        ? Math.max(targetJobs - totalScraped, 0)
+                        : Number.POSITIVE_INFINITY;
 
-                if (!jobCards.length && modelData.jobKeys.length) {
-                    const hydrated = await hydrateJobCardsViaApi(page, modelData.jobKeys);
-                    if (hydrated.length) {
-                        jobCards = hydrated;
+                    if (remainingSlots === 0) {
+                        log.info(`Target reached on page ${pageNum - 1}`);
+                        return;
                     }
-                }
 
-                if (!jobCards.length && apiCapture.hydratedCards.length) {
-                    jobCards = apiCapture.hydratedCards;
-                }
+                    let modelData = null;
+                    let usedNavigationFallback = false;
 
-                if (jobCards.length) {
-                    stats.apiPagesProcessed += 1;
+                    if (pageNum === 1) {
+                        modelData = initialModelData;
+                    } else {
+                        const nextUrl = buildSearchUrl(effectiveSearch, pageNum);
+                        const fetched = await fetchModelFromSearchPageViaSession(page, nextUrl);
 
-                    const pageCards = jobCards
-                        .filter((card) => card?.listingKey)
-                        .slice(0, Number.isFinite(remainingSlots) ? remainingSlots : undefined);
+                        if (fetched.ok && fetched.modelData) {
+                            modelData = fetched.modelData;
+                        } else {
+                            usedNavigationFallback = true;
+                            log.warning(`Session API pagination failed for page ${pageNum}, falling back to navigation`, {
+                                status: fetched.status,
+                                challenge: fetched.challenge,
+                                error: fetched.error,
+                            });
 
-                    const jobKeysForDetails = pageCards
-                        .map((card) => ({
-                            listingKey: card.listingKey,
-                            matchId: card.matchId || keyMap.get(card.listingKey)?.matchId || '',
-                            bidTrackingData: keyMap.get(card.listingKey)?.bidTrackingData || card.bidTrackingData || '',
-                        }))
-                        .filter((jobKey) => jobKey.listingKey && jobKey.matchId);
+                            await page.goto(nextUrl, { waitUntil: 'domcontentloaded', timeout: 60000 });
+                            await page.waitForTimeout(CONFIG.CONTENT_WAIT_MS);
+                            await dismissPopups(page);
+                            await page.waitForSelector('#js_variables', { timeout: 12000 }).catch(() => {});
+                            modelData = parseApiDataFromModel(await extractModelFromJsVariables(page));
+                        }
+                    }
 
-                    stats.detailCalls += jobKeysForDetails.length;
-                    const detailResult = await fetchListingDetailsBatchViaApi(page, {
-                        jobKeys: jobKeysForDetails,
-                        placementId: modelData.placementId,
-                        impressionLotId: modelData.impressionLotId,
-                    });
-                    const { detailsByListing, failed } = detailResult;
-                    stats.detailFailures += failed;
+                    if (modelData?.maxPages && modelData.maxPages > 0) {
+                        apiMaxPages = Math.min(apiMaxPages, modelData.maxPages);
+                    }
 
-                    records = pageCards.map((card) => {
-                        const detail = detailsByListing.get(card.listingKey) || null;
-                        return normalizeJobRecord(card, detail, {
-                            searchQuery: input.searchQuery || '',
-                            searchLocation: input.location || '',
-                            page: pageNum,
+                    let records = [];
+                    let usedDomFallback = false;
+
+                    let { jobCards } = modelData || { jobCards: [] };
+                    const keyMap = new Map(asArray(modelData?.jobKeys).map((jobKey) => [jobKey.listingKey, jobKey]));
+
+                    if (!jobCards.length && asArray(modelData?.jobKeys).length) {
+                        const hydrated = await hydrateJobCardsViaApi(page, modelData.jobKeys);
+                        if (hydrated.length) {
+                            jobCards = hydrated;
+                        }
+                    }
+
+                    if (!jobCards.length && pageNum === 1 && apiCapture.hydratedCards.length) {
+                        jobCards = apiCapture.hydratedCards;
+                    }
+
+                    if (jobCards.length) {
+                        stats.apiPagesProcessed += 1;
+
+                        const pageCards = jobCards
+                            .filter((card) => card?.listingKey)
+                            .slice(0, Number.isFinite(remainingSlots) ? remainingSlots : undefined);
+
+                        const jobKeysForDetails = pageCards
+                            .map((card) => ({
+                                listingKey: card.listingKey,
+                                matchId: card.matchId || keyMap.get(card.listingKey)?.matchId || '',
+                                bidTrackingData: keyMap.get(card.listingKey)?.bidTrackingData || card.bidTrackingData || '',
+                            }))
+                            .filter((jobKey) => jobKey.listingKey && jobKey.matchId);
+
+                        stats.detailCalls += jobKeysForDetails.length;
+                        const detailResult = await fetchListingDetailsBatchViaApi(page, {
+                            jobKeys: jobKeysForDetails,
+                            placementId: modelData.placementId,
+                            impressionLotId: modelData.impressionLotId,
                         });
-                    });
-                }
+                        const { detailsByListing, failed } = detailResult;
+                        stats.detailFailures += failed;
 
-                if (!records.length) {
-                    usedDomFallback = true;
-                    stats.domFallbackPages += 1;
-                    log.warning(`API extraction returned no jobs on page ${pageNum}. Falling back to DOM.`);
-                    records = await extractJobsByDomFallback(page);
-                }
+                        records = pageCards.map((card) => {
+                            const detail = detailsByListing.get(card.listingKey) || null;
+                            return normalizeJobRecord(card, detail, {
+                                searchQuery: effectiveSearch.searchQuery || '',
+                                searchLocation: effectiveSearch.location || '',
+                                page: pageNum,
+                            });
+                        });
+                    }
 
-                stats.pagesProcessed += 1;
+                    if (!records.length && pageNum === 1) {
+                        usedDomFallback = true;
+                        stats.domFallbackPages += 1;
+                        log.warning('API extraction returned no jobs on page 1. Falling back to DOM.');
+                        records = await extractJobsByDomFallback(page);
+                    }
 
-                const uniqueRecords = [];
-                for (const record of records) {
-                    const dedupeKey = record.listingKey
-                        || record.jobId
-                        || `${record.title || ''}|${record.company || ''}|${record.location || ''}`;
+                    stats.pagesProcessed += 1;
 
-                    if (!dedupeKey || seenJobIds.has(dedupeKey)) continue;
-                    seenJobIds.add(dedupeKey);
-                    uniqueRecords.push(record);
-                }
+                    const uniqueRecords = [];
+                    for (const record of records) {
+                        const dedupeKey = record.listingKey
+                            || record.jobId
+                            || `${record.title || ''}|${record.company || ''}|${record.location || ''}`;
 
-                if (!uniqueRecords.length) {
-                    consecutiveEmpty += 1;
-                    log.info(`Page ${pageNum}: no new jobs`);
-                } else {
-                    consecutiveEmpty = 0;
-                    const limitedRecords = Number.isFinite(remainingSlots)
-                        ? uniqueRecords.slice(0, remainingSlots)
-                        : uniqueRecords;
+                        if (!dedupeKey || seenJobIds.has(dedupeKey)) continue;
+                        seenJobIds.add(dedupeKey);
+                        uniqueRecords.push(record);
+                    }
 
-                    const pushedCount = await pushRecordsSafely(limitedRecords);
-                    totalScraped += pushedCount;
-                    stats.jobsExtracted += pushedCount;
+                    if (!uniqueRecords.length) {
+                        consecutiveEmpty += 1;
+                        log.info(`Page ${pageNum}: no new jobs`);
+                    } else {
+                        consecutiveEmpty = 0;
+                        const limitedRecords = Number.isFinite(remainingSlots)
+                            ? uniqueRecords.slice(0, remainingSlots)
+                            : uniqueRecords;
 
-                    log.info(`Page ${pageNum}: extracted ${pushedCount} jobs`, {
-                        total: totalScraped,
-                        mode: usedDomFallback ? 'dom-fallback' : 'api-first',
-                    });
-                }
+                        const pushedCount = await pushRecordsSafely(limitedRecords);
+                        totalScraped += pushedCount;
+                        stats.jobsExtracted += pushedCount;
+                        let extractionMode = 'api-first';
+                        if (usedDomFallback) {
+                            extractionMode = 'dom-fallback';
+                        } else if (usedNavigationFallback) {
+                            extractionMode = 'api-first+nav-fallback';
+                        }
 
-                const reachedTarget = Number.isFinite(targetJobs) && totalScraped >= targetJobs;
-                if (reachedTarget) {
-                    log.info(`Target reached on page ${pageNum}`);
-                    return;
-                }
+                        log.info(`Page ${pageNum}: extracted ${pushedCount} jobs`, {
+                            total: totalScraped,
+                            mode: extractionMode,
+                        });
+                    }
 
-                if (consecutiveEmpty >= 2) {
-                    log.info(`Stopping after ${consecutiveEmpty} empty pages`);
-                    return;
-                }
+                    if (Number.isFinite(targetJobs) && totalScraped >= targetJobs) {
+                        log.info(`Target reached on page ${pageNum}`);
+                        return;
+                    }
 
-                if (pageNum >= apiMaxPages) {
-                    log.info(`Stopping at page ${pageNum}; reached API max pages (${apiMaxPages})`);
-                    return;
-                }
+                    if (consecutiveEmpty >= 2) {
+                        log.info(`Stopping after ${consecutiveEmpty} empty pages`);
+                        return;
+                    }
 
-                const nextPage = pageNum + 1;
-                if (nextPage <= apiMaxPages) {
-                    await crawler.addRequests([{
-                        url: buildSearchUrl(input, nextPage),
-                        userData: { pageNum: nextPage },
-                    }]);
+                    await page.waitForTimeout(60 + Math.floor(Math.random() * 120));
                 }
             } finally {
                 page.off('response', onResponse);
@@ -809,8 +925,7 @@ try {
     });
 
     await crawler.run([{
-        url: buildSearchUrl(input, 1),
-        userData: { pageNum: 1 },
+        url: buildSearchUrl(effectiveSearch, 1),
     }]);
 
     const durationSeconds = Math.round((Date.now() - stats.startTime) / 1000);

@@ -9,3 +9,5 @@ node_modules
 apify_storage
 storage
 package-lock.json
+src/main.browser-pagination.backup.js
+backup/RESTORE-INSTRUCTIONS.txt
