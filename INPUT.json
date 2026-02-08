@@ -1,6 +1,8 @@
 {
+  "searchUrl": "https://www.ziprecruiter.com/jobs-search?location=New+York%2C+NY&search=software+engineer",
   "searchQuery": "software engineer",
-  "maxJobs": 50,
+  "location": "New York, NY",
+  "maxJobs": 20,
   "radius": "25",
   "daysBack": "any",
   "proxyConfiguration": {

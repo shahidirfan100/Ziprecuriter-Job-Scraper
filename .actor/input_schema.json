@@ -22,13 +22,16 @@
             "title": "Location",
             "type": "string",
             "description": "Location to search for jobs (e.g., 'New York, NY', 'California', 'Remote'). Recommended for best results.",
-            "editor": "textfield"
+            "editor": "textfield",
+            "default": "New York, NY",
+            "prefill": "New York, NY"
         },
         "maxJobs": {
             "title": "Maximum Jobs",
             "type": "integer",
-            "description": "Maximum number of job listings to scrape (0 = unlimited). Default is 50.",
-            "default": 50,
+            "description": "Maximum number of job listings to scrape (0 = unlimited). Default is 20.",
+            "default": 20,
+            "prefill": 20,
             "minimum": 0,
             "maximum": 10000
         },
@@ -37,6 +40,7 @@
             "type": "string",
             "description": "Distance from location to search within",
             "default": "25",
+            "prefill": "25",
             "enum": [
                 "5",
                 "10",
@@ -59,6 +63,7 @@
             "type": "string",
             "description": "Filter by how recently jobs were posted",
             "default": "any",
+            "prefill": "any",
             "enum": [
                 "any",
                 "1",
@@ -82,6 +87,12 @@
             "description": "Proxy settings for bypassing anti-bot protection. Residential proxies highly recommended for ZipRecruiter.",
             "editor": "proxy",
             "default": {
+                "useApifyProxy": true,
+                "apifyProxyGroups": [
+                    "RESIDENTIAL"
+                ]
+            },
+            "prefill": {
                 "useApifyProxy": true,
                 "apifyProxyGroups": [
                     "RESIDENTIAL"

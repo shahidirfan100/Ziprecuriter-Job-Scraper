@@ -136,7 +136,7 @@ try {
         throw new Error('Provide "searchUrl" OR "searchQuery"');
     }
 
-    const maxJobs = input.maxJobs ?? 50;
+    const maxJobs = input.maxJobs ?? 20;
     const totalPagesNeeded = Math.ceil(maxJobs / CONFIG.JOBS_PER_PAGE);
 
     log.info(`🔍 Query: ${input.searchQuery || 'N/A'}`);
