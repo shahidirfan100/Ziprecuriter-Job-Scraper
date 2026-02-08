@@ -29,6 +29,13 @@ const seenJobIds = new Set();
 
 const asArray = (value) => (Array.isArray(value) ? value : []);
 
+const NULLABLE_NUMBER_FIELDS = [
+    'salaryMin',
+    'salaryMax',
+    'salaryMinAnnual',
+    'salaryMaxAnnual',
+];
+
 const safeJsonParse = (value, fallback = null) => {
     try {
         return JSON.parse(value);
@@ -115,6 +122,61 @@ function normalizeTypedNames(items) {
         .map((item) => item?.name)
         .filter((name) => typeof name === 'string' && name.trim())
         .map((name) => name.trim());
+}
+
+function sanitizeRecordForDataset(record) {
+    if (!record || typeof record !== 'object') return null;
+
+    const sanitized = { ...record };
+
+    for (const field of NULLABLE_NUMBER_FIELDS) {
+        if (sanitized[field] === null || typeof sanitized[field] !== 'number') {
+            delete sanitized[field];
+        }
+    }
+
+    if (typeof sanitized.isActive !== 'boolean') {
+        delete sanitized.isActive;
+    }
+
+    if (!sanitized.rawCard || typeof sanitized.rawCard !== 'object' || Array.isArray(sanitized.rawCard)) {
+        delete sanitized.rawCard;
+    }
+
+    if (!sanitized.rawDetails || typeof sanitized.rawDetails !== 'object' || Array.isArray(sanitized.rawDetails)) {
+        delete sanitized.rawDetails;
+    }
+
+    return sanitized;
+}
+
+async function pushRecordsSafely(records) {
+    if (!records.length) return 0;
+
+    const sanitizedRecords = records
+        .map((record) => sanitizeRecordForDataset(record))
+        .filter(Boolean);
+
+    if (!sanitizedRecords.length) return 0;
+
+    try {
+        await Actor.pushData(sanitizedRecords);
+        return sanitizedRecords.length;
+    } catch (error) {
+        log.warning(`Bulk push failed (${error.message}). Retrying item-by-item.`);
+    }
+
+    let pushed = 0;
+    for (const record of sanitizedRecords) {
+        try {
+            await Actor.pushData(record);
+            pushed += 1;
+        } catch (error) {
+            log.warning(`Skipping invalid record during push: ${error.message}`);
+        }
+    }
+
+    return pushed;
 }
 
 function buildSearchUrl(input, pageNum = 1) {
@@ -622,6 +684,9 @@ try {
 
                 const model = await extractModelFromJsVariables(page);
                 const modelData = parseApiDataFromModel(model);
+                const apiMaxPages = modelData.maxPages && modelData.maxPages > 0
+                    ? Math.min(modelData.maxPages, maxPages)
+                    : maxPages;
 
                 let { jobCards } = modelData;
                 const keyMap = new Map(modelData.jobKeys.map((jobKey) => [jobKey.listingKey, jobKey]));
@@ -700,11 +765,11 @@ try {
                         ? uniqueRecords.slice(0, remainingSlots)
                         : uniqueRecords;
 
-                    await Actor.pushData(limitedRecords);
-                    totalScraped += limitedRecords.length;
-                    stats.jobsExtracted += limitedRecords.length;
+                    const pushedCount = await pushRecordsSafely(limitedRecords);
+                    totalScraped += pushedCount;
+                    stats.jobsExtracted += pushedCount;
 
-                    log.info(`Page ${pageNum}: extracted ${limitedRecords.length} jobs`, {
+                    log.info(`Page ${pageNum}: extracted ${pushedCount} jobs`, {
                         total: totalScraped,
                         mode: usedDomFallback ? 'dom-fallback' : 'api-first',
                     });
@@ -721,8 +786,13 @@ try {
                     return;
                 }
 
+                if (pageNum >= apiMaxPages) {
+                    log.info(`Stopping at page ${pageNum}; reached API max pages (${apiMaxPages})`);
+                    return;
+                }
+
                 const nextPage = pageNum + 1;
-                if (nextPage <= maxPages) {
+                if (nextPage <= apiMaxPages) {
                     await crawler.addRequests([{
                         url: buildSearchUrl(input, nextPage),
                         userData: { pageNum: nextPage },
