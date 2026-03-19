@@ -5,9 +5,6 @@
   "maxJobs": 20,
   "daysBack": "any",
   "proxyConfiguration": {
-    "useApifyProxy": true,
-    "apifyProxyGroups": [
-      "RESIDENTIAL"
-    ]
+    "useApifyProxy": true
   }
 }

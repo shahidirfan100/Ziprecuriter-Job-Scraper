@@ -73,16 +73,7 @@
             "description": "Proxy settings for bypassing anti-bot protection. Residential proxies highly recommended for ZipRecruiter.",
             "editor": "proxy",
             "default": {
-                "useApifyProxy": true,
-                "apifyProxyGroups": [
-                    "RESIDENTIAL"
-                ]
-            },
-            "prefill": {
-                "useApifyProxy": true,
-                "apifyProxyGroups": [
-                    "RESIDENTIAL"
-                ]
+                "useApifyProxy": true
             }
         }
     },
