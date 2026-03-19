@@ -7,21 +7,24 @@ await Actor.init();
 
 const CONFIG = {
     CLOUDFLARE_WAIT_MS: 2200,
-    CONTENT_WAIT_MS: 300,
+    CONTENT_WAIT_MS: 180,
     JOBS_PER_PAGE: 20,
     DEFAULT_MAX_PAGES: 50,
     MAX_PAGES_HARD_LIMIT: 200,
-    DETAIL_CONCURRENCY: 3,
+    DETAIL_CONCURRENCY: 4,
 };
 const DEFAULT_SEARCH_QUERY = 'software engineer';
 
 const stats = {
     pagesProcessed: 0,
     apiPagesProcessed: 0,
-    domFallbackPages: 0,
     jobsExtracted: 0,
+    challengeRetries: 0,
+    emptyApiPages: 0,
     detailCalls: 0,
     detailFailures: 0,
+    totalPageMs: 0,
+    slowPages: 0,
     startTime: Date.now(),
     apiEndpoints: new Set(),
 };
@@ -45,6 +48,175 @@ const safeJsonParse = (value, fallback = null) => {
     }
 };
 
+const NEXT_FLIGHT_PUSH_REGEX = /self\.__next_f\.push\(\[1,\\"([\s\S]*?)\\"\]\)/g;
+
+function decodeNextFlightPayloadFromHtml(html) {
+    if (!html || typeof html !== 'string') return '';
+
+    const chunks = [];
+    for (const match of html.matchAll(NEXT_FLIGHT_PUSH_REGEX)) {
+        const rawChunk = match[1];
+        try {
+            chunks.push(JSON.parse(`"${rawChunk}"`));
+        } catch {
+            // Ignore malformed chunks and continue.
+        }
+    }
+
+    return chunks.join('\n');
+}
+
+function extractJsonObjectByMarker(source, marker) {
+    if (!source || typeof source !== 'string') return null;
+    const markerIndex = source.indexOf(marker);
+    if (markerIndex < 0) return null;
+
+    const start = source.indexOf('{', markerIndex + marker.length - 1);
+    if (start < 0) return null;
+
+    let depth = 0;
+    let inString = false;
+    let escaped = false;
+
+    for (let i = start; i < source.length; i += 1) {
+        const ch = source[i];
+
+        if (inString) {
+            if (escaped) {
+                escaped = false;
+            } else if (ch === '\\') {
+                escaped = true;
+            } else if (ch === '"') {
+                inString = false;
+            }
+            continue;
+        }
+
+        if (ch === '"') {
+            inString = true;
+            continue;
+        }
+
+        if (ch === '{') depth += 1;
+        if (ch === '}') {
+            depth -= 1;
+            if (depth === 0) {
+                return source.slice(start, i + 1);
+            }
+        }
+    }
+
+    return null;
+}
+
+function extractJsonObjectByKey(source, key) {
+    return extractJsonObjectByMarker(source, `"${key}":{`);
+}
+
+function extractLooseObjectFromMarker(source, markerText) {
+    if (!source || typeof source !== 'string') return null;
+
+    const markerIndex = source.indexOf(markerText);
+    if (markerIndex < 0) return null;
+
+    const start = source.lastIndexOf('{', markerIndex);
+    if (start < 0) return null;
+
+    let depth = 0;
+    for (let i = start; i < source.length; i += 1) {
+        const ch = source[i];
+        if (ch === '{') depth += 1;
+        if (ch === '}') {
+            depth -= 1;
+            if (depth === 0) {
+                return source.slice(start, i + 1);
+            }
+        }
+    }
+
+    return null;
+}
+
+function extractSearchPayloadFromHtml(html) {
+    const findCardsNode = (value, depth = 0) => {
+        if (!value || typeof value !== 'object' || depth > 8) return null;
+
+        if (
+            Array.isArray(value.jobKeys)
+            || (value.jobKeysMap && typeof value.jobKeysMap === 'object')
+        ) {
+            return value;
+        }
+
+        if (Array.isArray(value)) {
+            for (const item of value) {
+                const foundInItem = findCardsNode(item, depth + 1);
+                if (foundInItem) return foundInItem;
+            }
+            return null;
+        }
+
+        for (const nestedValue of Object.values(value)) {
+            const found = findCardsNode(nestedValue, depth + 1);
+            if (found) return found;
+        }
+
+        return null;
+    };
+
+    const mergedPayload = decodeNextFlightPayloadFromHtml(html);
+    let cardsData = null;
+
+    if (mergedPayload) {
+        const cardsText = extractJsonObjectByKey(mergedPayload, 'serializedJobCardsData');
+        cardsData = safeJsonParse(cardsText, null);
+    }
+
+    if (!cardsData) {
+        const escapedObject = extractLooseObjectFromMarker(html, 'serializedJobCardsData');
+        if (escapedObject) {
+            const decoded = escapedObject
+                .replace(/\\\\/g, '\\')
+                .replace(/\\"/g, '"');
+            cardsData = safeJsonParse(decoded, null);
+        }
+    }
+
+    if (!cardsData) {
+        const plainObject = extractJsonObjectByMarker(html, '"serializedJobCardsData":{');
+        cardsData = safeJsonParse(plainObject, null);
+    }
+
+    if (!cardsData) return null;
+
+    cardsData = findCardsNode(cardsData);
+    if (!cardsData) return null;
+
+    const jobKeys = asArray(cardsData.jobKeys)
+        .filter((jobKey) => jobKey?.listingKey && jobKey?.matchId)
+        .map((jobKey) => ({
+            listingKey: jobKey.listingKey,
+            matchId: jobKey.matchId,
+            bidTrackingData: jobKey.bidTrackingData || '',
+        }));
+
+    const rawMap = cardsData.jobKeysMap && typeof cardsData.jobKeysMap === 'object'
+        ? cardsData.jobKeysMap
+        : {};
+
+    const jobKeysMap = Object.fromEntries(
+        Object.entries(rawMap).filter(([, value]) => value && typeof value === 'object' && !Array.isArray(value)),
+    );
+
+    return {
+        jobKeys,
+        jobKeysMap,
+        totalListings: Number(cardsData.totalListings || 0) || null,
+        placementId: Number(cardsData.placementId || 0) || null,
+        impressionLotId: typeof cardsData.impressionLotId === 'string' ? cardsData.impressionLotId : '',
+    };
+}
+
 function normalizeUrl(value) {
     if (!value || typeof value !== 'string') return '';
     const raw = value.startsWith('/') ? `https://www.ziprecruiter.com${value}` : value;
@@ -58,13 +230,74 @@ function normalizeUrl(value) {
 
 function stripHtml(html) {
     if (!html || typeof html !== 'string') return '';
-    return html
+    const text = html
         .replace(/<style[\s\S]*?<\/style>/gi, ' ')
         .replace(/<script[\s\S]*?<\/script>/gi, ' ')
         .replace(/<[^>]+>/g, ' ')
+        .replace(/\s+/g, ' ')
+        .trim();
+
+    return decodeHtmlEntities(text);
+}
+
+function decodeHtmlEntities(text) {
+    if (!text || typeof text !== 'string') return '';
+
+    return text
+        .replace(/&#x([0-9a-f]+);/gi, (_, hex) => {
+            const code = Number.parseInt(hex, 16);
+            return Number.isFinite(code) ? String.fromCodePoint(code) : _;
+        })
+        .replace(/&#(\d+);/g, (_, num) => {
+            const code = Number.parseInt(num, 10);
+            return Number.isFinite(code) ? String.fromCodePoint(code) : _;
+        })
         .replace(/&nbsp;/gi, ' ')
+        .replace(/&quot;/gi, '"')
+        .replace(/&apos;|&#39;/gi, "'")
+        .replace(/&lt;/gi, '<')
+        .replace(/&gt;/gi, '>')
         .replace(/&amp;/gi, '&')
         .replace(/\s+/g, ' ')
+        .trim();
+}
+
+const DESCRIPTION_ALLOWED_TAGS = new Set(['p', 'br', 'strong', 'em', 'ul', 'ol', 'li']);
+
+function sanitizeDescriptionHtml(html) {
+    if (!html || typeof html !== 'string') return '';
+
+    const normalized = html
+        .replace(/<style[\s\S]*?<\/style>/gi, ' ')
+        .replace(/<script[\s\S]*?<\/script>/gi, ' ')
+        .replace(/<!--[\s\S]*?-->/g, ' ')
+        .replace(/<\/?b(\s[^>]*)?>/gi, (tag) => (tag.startsWith('</') ? '</strong>' : '<strong>'));
+
+    const sanitized = normalized.replace(/<\/?([a-z0-9]+)(\s[^>]*)?>/gi, (fullTag, tagName) => {
+        const tag = String(tagName || '').toLowerCase();
+        const isClosing = fullTag.startsWith('</');
+
+        if (!DESCRIPTION_ALLOWED_TAGS.has(tag)) return ' ';
+        if (tag === 'br') return '<br>';
+        return isClosing ? `</${tag}>` : `<${tag}>`;
+    });
+
+    return sanitized
+        .replace(/\s{2,}/g, ' ')
+        .replace(/>\s+</g, '><')
+        .trim();
+}
+
+function toReadableEnumName(value) {
+    if (!value || typeof value !== 'string') return '';
+
+    return value
+        .replace(/^(LOCATION_TYPE_NAME_|EMPLOYMENT_TYPE_NAME_)/i, '')
+        .toLowerCase()
+        .split('_')
+        .filter(Boolean)
+        .map((word) => word.charAt(0).toUpperCase() + word.slice(1))
+        .join(' ')
         .trim();
 }
 
@@ -125,9 +358,25 @@ function normalizeTypedNames(items) {
         .map((name) => name.trim());
 }
 
+    function normalizeTypedLabels(items) {
+        return normalizeTypedNames(items)
+        .map((name) => toReadableEnumName(name))
+        .filter(Boolean);
+    }
+
 function normalizeInputString(value) {
     if (typeof value !== 'string') return '';
     return value.trim();
+}
+
+function recordPageTiming(pageNum, pageStartedAt) {
+    const pageDurationMs = Date.now() - pageStartedAt;
+    stats.totalPageMs += pageDurationMs;
+
+    if (pageDurationMs > 3500) {
+        stats.slowPages += 1;
+        log.warning(`Slow page detected: ${pageDurationMs}ms on page ${pageNum}`);
+    }
 }
 
 function sanitizeRecordForDataset(record) {
@@ -145,12 +394,45 @@ function sanitizeRecordForDataset(record) {
         delete sanitized.isActive;
     }
 
-    if (!sanitized.rawCard || typeof sanitized.rawCard !== 'object' || Array.isArray(sanitized.rawCard)) {
-        delete sanitized.rawCard;
+    for (const [key, value] of Object.entries(sanitized)) {
+        if (Array.isArray(value)) {
+            const primitiveItems = value
+                .filter((item) => ['string', 'number', 'boolean'].includes(typeof item))
+                .map((item) => String(item).trim())
+                .filter(Boolean);
+
+            if (!primitiveItems.length) {
+                delete sanitized[key];
+            } else {
+                sanitized[key] = primitiveItems.join(', ');
+            }
+            continue;
+        }
+
+        if (value && typeof value === 'object') {
+            delete sanitized[key];
+            continue;
+        }
+
+        if (value === null || value === undefined || value === '') {
+            delete sanitized[key];
+        }
     }
 
-    if (!sanitized.rawDetails || typeof sanitized.rawDetails !== 'object' || Array.isArray(sanitized.rawDetails)) {
-        delete sanitized.rawDetails;
+    if (sanitized.jobId && sanitized.listingKey && sanitized.jobId === sanitized.listingKey) {
+        delete sanitized.jobId;
+    }
+
+    if (sanitized.postedDate && sanitized.postedAtUtc && sanitized.postedDate === sanitized.postedAtUtc) {
+        delete sanitized.postedDate;
+    }
+
+    if (sanitized.locationType && sanitized.locationTypes && sanitized.locationType === sanitized.locationTypes) {
+        delete sanitized.locationTypes;
+    }
+
+    if (sanitized.jobType && sanitized.employmentTypes && sanitized.jobType === sanitized.employmentTypes) {
+        delete sanitized.employmentTypes;
     }
 
     return sanitized;
@@ -222,147 +504,6 @@ async function dismissPopups(page) {
     }
 }
 
-async function extractModelFromJsVariables(page) {
-    const raw = await page.evaluate(() => {
-        const el = document.querySelector('#js_variables');
-        return el?.textContent || '';
-    });
-
-    if (!raw) return null;
-    return safeJsonParse(raw, null);
-}
-
-async function fetchModelFromSearchPageViaSession(page, targetUrl) {
-    const result = await page.evaluate(async ({ url }) => {
-        try {
-            const response = await fetch(url, {
-                method: 'GET',
-                credentials: 'include',
-                headers: {
-                    accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-                },
-            });
-            const html = await response.text();
-            const doc = new DOMParser().parseFromString(html, 'text/html');
-            const raw = doc.querySelector('#js_variables')?.textContent || '';
-            const challenge = /just a moment|cloudflare/i.test(html);
-
-            return {
-                ok: response.ok,
-                status: response.status,
-                raw,
-                challenge,
-            };
-        } catch (error) {
-            return {
-                ok: false,
-                status: 0,
-                raw: '',
-                challenge: false,
-                error: String(error),
-            };
-        }
-    }, { url: targetUrl });
-
-    if (!result.ok || !result.raw) {
-        return {
-            ok: false,
-            status: result.status,
-            challenge: Boolean(result.challenge),
-            error: result.error || 'No js_variables in session fetch response',
-            modelData: null,
-        };
-    }
-
-    const model = safeJsonParse(result.raw, null);
-    if (!model) {
-        return {
-            ok: false,
-            status: result.status,
-            challenge: Boolean(result.challenge),
-            error: 'Failed to parse js_variables JSON from session fetch response',
-            modelData: null,
-        };
-    }
-
-    return {
-        ok: true,
-        status: result.status,
-        challenge: false,
-        error: '',
-        modelData: parseApiDataFromModel(model),
-    };
-}
-
-function parseApiDataFromModel(model) {
-    if (!model || typeof model !== 'object') {
-        return {
-            pageNum: null,
-            maxPages: null,
-            placementId: null,
-            impressionLotId: '',
-            jobKeys: [],
-            jobCards: [],
-        };
-    }
-
-    const impressionLotId = model.impressionSetId
-        || model.suggestedSearchData?.impressionSetId
-        || model.suggestedSearchData?.impressionSupersetId
-        || '';
-
-    const placementId = Number(model.placementID || model.placementId || 0) || null;
-
-    const jobKeys = asArray(model.listJobKeysResponse?.jobKeys)
-        .filter((jobKey) => jobKey?.listingKey && jobKey?.matchId)
-        .map((jobKey) => ({
-            listingKey: jobKey.listingKey,
-            matchId: jobKey.matchId,
-            bidTrackingData: jobKey.bidTrackingData || '',
-        }));
-
-    const jobCards = asArray(model.hydrateJobCardsResponse?.jobCards)
-        .filter((jobCard) => jobCard?.listingKey);
-
-    return {
-        pageNum: Number(model.page || 0) || null,
-        maxPages: Number(model.maxPages || 0) || null,
-        placementId,
-        impressionLotId,
-        jobKeys,
-        jobCards,
-    };
-}
-
-async function hydrateJobCardsViaApi(page, jobKeys) {
-    if (!jobKeys.length) return [];
-
-    const result = await page.evaluate(async ({ keys }) => {
-        try {
-            const response = await fetch('/job_services.job_card.api_public.public.api.v1.API/HydrateJobCards', {
-                method: 'POST',
-                headers: {
-                    'content-type': 'application/json',
-                    accept: 'application/json',
-                },
-                credentials: 'include',
-                body: JSON.stringify({ jobKeys: keys }),
-            });
-
-            if (!response.ok) {
-                return { ok: false, status: response.status, jobCards: [] };
-            }
-
-            const data = await response.json().catch(() => ({}));
-            return { ok: true, status: response.status, jobCards: Array.isArray(data?.jobCards) ? data.jobCards : [] };
-        } catch (error) {
-            return { ok: false, status: 0, error: String(error), jobCards: [] };
-        }
-    }, { keys: jobKeys });
-
-    return result.jobCards || [];
-}
-
 async function fetchListingDetailsBatchViaApi(page, options) {
     const {
         jobKeys,
@@ -379,7 +520,7 @@ async function fetchListingDetailsBatchViaApi(page, options) {
         }));
 
     if (!validJobKeys.length || !placementId || !impressionLotId) {
-        return { detailsByListing: new Map(), failed: 0 };
+        return { detailsByListing: new Map(), failed: validJobKeys.length };
     }
 
     const results = await page.evaluate(async ({ keys, placementIdValue, impressionLotIdValue, maxConcurrency }) => {
@@ -415,12 +556,10 @@ async function fetchListingDetailsBatchViaApi(page, options) {
                     });
 
                     if (!response.ok) {
-                        const text = await response.text().catch(() => '');
                         collected.push({
                             listingKey: key.listingKey,
                             ok: false,
                             status: response.status,
-                            error: text.slice(0, 300),
                         });
                         continue;
                     }
@@ -432,15 +571,11 @@ async function fetchListingDetailsBatchViaApi(page, options) {
                         status: response.status,
                         jobDetails: data?.jobDetails || null,
                     });
-                    await new Promise((resolve) => {
-                        setTimeout(resolve, 40 + Math.floor(Math.random() * 80));
-                    });
-                } catch (error) {
+                } catch {
                     collected.push({
                         listingKey: key.listingKey,
                         ok: false,
                         status: 0,
-                        error: String(error),
                     });
                 }
             }
@@ -472,13 +607,12 @@ async function fetchListingDetailsBatchViaApi(page, options) {
 function normalizeJobRecord(card, detail, context) {
     const status = detail?.status || card?.status || {};
     const company = detail?.company || card?.company || {};
-    const companyWidget = detail?.companyWidget || {};
     const location = detail?.location || card?.location || {};
     const pay = detail?.pay || card?.pay || {};
     const applyButton = detail?.applyButtonConfig || card?.applyButtonConfig || {};
 
-    const employmentTypes = normalizeTypedNames(detail?.employmentTypes || card?.employmentTypes);
-    const locationTypes = normalizeTypedNames(detail?.locationTypes || card?.locationTypes);
+    const employmentTypes = normalizeTypedLabels(card?.employmentTypes);
+    const locationTypes = normalizeTypedLabels(card?.locationTypes);
 
     const salaryInfo = formatSalary(pay);
 
@@ -487,12 +621,12 @@ function normalizeJobRecord(card, detail, context) {
     const jobUrl = canonicalJobUrl || redirectJobUrl;
 
     const externalApplyUrl = normalizeUrl(applyButton.externalApplyUrl || '');
-    const companyUrl = normalizeUrl(detail?.companyUrl || card?.companyUrl || companyWidget.companyPageLink || '');
+    const companyUrl = normalizeUrl(detail?.companyUrl || card?.companyUrl || '');
     const locationUrl = normalizeUrl(detail?.locationUrl || card?.locationUrl || '');
 
-    const shortDescription = card?.shortDescription || '';
-    const htmlDescription = detail?.htmlFullDescription || '';
-    const textDescription = stripHtml(htmlDescription) || shortDescription;
+    const sourceDescriptionHtml = detail?.htmlFullDescription || card?.htmlFullDescription || card?.shortDescription || '';
+    const descriptionHtml = sanitizeDescriptionHtml(sourceDescriptionHtml) || sanitizeDescriptionHtml(card?.shortDescription || '');
+    const descriptionText = stripHtml(descriptionHtml) || stripHtml(card?.shortDescription || '');
 
     const locationName = location.displayName || card?.location?.displayName || '';
     const remoteByType = locationTypes.some((type) => /remote/i.test(type));
@@ -500,12 +634,11 @@ function normalizeJobRecord(card, detail, context) {
 
     return {
         title: detail?.title || card?.title || 'Unknown Title',
-        company: company.canonicalDisplayName || company.name || companyWidget.displayName || '',
+        company: company.canonicalDisplayName || company.name || '',
         companyCanonicalName: company.canonicalDisplayName || '',
         companyId: company.id || '',
         companyUrl: companyUrl || undefined,
         companyLogoUrl: detail?.companyLogoUrl || card?.companyLogo?.logoUrl || '',
-        companyWidget,
 
         location: locationName,
         locationUrl: locationUrl || undefined,
@@ -538,69 +671,21 @@ function normalizeJobRecord(card, detail, context) {
         externalApplyUrl: externalApplyUrl || undefined,
         applyButtonType: applyButton.applyButtonType || '',
         applyDestination: applyButton.destination || '',
-        applyStatus: applyButton.currentApplicationStatus || null,
 
-        listingKey: card?.listingKey || detail?.listingKey || '',
+        listingKey: card?.listingKey || '',
         matchId: card?.matchId || '',
-        jobId: card?.listingKey || detail?.listingKey || '',
+        jobId: card?.listingKey || '',
         openSeatId: card?.openSeatId || '',
 
-        description: textDescription,
-        shortDescription,
-        htmlDescription,
+        description_text: descriptionText,
+        description_html: descriptionHtml,
 
         searchQuery: context.searchQuery || '',
         searchLocation: context.searchLocation || '',
         page: context.page,
 
-        rawCard: card || null,
-        rawDetails: detail || null,
         scrapedAt: new Date().toISOString(),
     };
-}
-
-async function extractJobsByDomFallback(page) {
-    return page.evaluate(() => {
-        const cards = Array.from(document.querySelectorAll('.job_result_two_pane_v2'));
-
-        return cards.map((card) => {
-            const article = card.querySelector('article');
-            const articleId = article?.id || '';
-            const listingKey = articleId.replace('job-card-', '');
-
-            const titleEl = card.querySelector('h2');
-            const title = titleEl?.getAttribute('aria-label')?.trim() || titleEl?.textContent?.trim() || '';
-
-            const companyEl = card.querySelector('[data-testid="job-card-company"]');
-            const company = companyEl?.textContent?.trim() || '';
-            const companyUrl = companyEl?.getAttribute('href') || '';
-
-            const locationEl = card.querySelector('[data-testid="job-card-location"]');
-            const location = locationEl?.textContent?.trim() || '';
-
-            let salary = 'Not specified';
-            card.querySelectorAll('p').forEach((paragraph) => {
-                const text = paragraph.textContent?.trim() || '';
-                if (text.includes('$')) salary = text;
-            });
-
-            const text = card.textContent || '';
-            const postedMatch = text.match(/Posted\s+(\d+\s+\w+\s+ago|today|yesterday)/i);
-
-            return {
-                title: title || 'Unknown Title',
-                company,
-                companyUrl,
-                location,
-                salary,
-                postedDate: postedMatch?.[1] || '',
-                listingKey,
-                jobId: listingKey,
-                url: listingKey ? `https://www.ziprecruiter.com/jobs/${listingKey}` : '',
-                scrapedAt: new Date().toISOString(),
-            };
-        }).filter((job) => job.title || job.company);
-    });
 }
 
 try {
@@ -640,7 +725,7 @@ try {
 
     const proxyUrl = await proxyConfiguration?.newUrl();
 
-    log.info('Starting ZipRecruiter actor in API-first mode', {
+    log.info('Starting ZipRecruiter actor in API-only search payload mode', {
         searchQuery: effectiveSearch.searchQuery || null,
         location: effectiveSearch.location || null,
         usingSearchUrl: Boolean(effectiveSearch.searchUrl),
@@ -717,132 +802,99 @@ try {
             },
         ],
 
-        async requestHandler({ page }) {
+        async requestHandler({ page, response }) {
             if (Number.isFinite(targetJobs) && totalScraped >= targetJobs) return;
 
-            const apiCapture = {
-                hydratedCards: [],
-            };
+            await page.waitForLoadState('domcontentloaded', { timeout: 20000 }).catch(() => {});
+            await page.waitForTimeout(CONFIG.CONTENT_WAIT_MS);
 
-            const onResponse = async (response) => {
+            let discoveredMaxPages = maxPages;
+
+            for (let pageNum = 1; pageNum <= discoveredMaxPages; pageNum += 1) {
+                const pageStartedAt = Date.now();
+                const remainingSlots = Number.isFinite(targetJobs)
+                    ? Math.max(targetJobs - totalScraped, 0)
+                    : Number.POSITIVE_INFINITY;
+
+                if (remainingSlots === 0) {
+                    log.info(`Target reached on page ${pageNum - 1}`);
+                    return;
+                }
+
+                let records = [];
+                let usedChallengeRetry = false;
+
                 try {
-                    const url = response.url();
-                    const contentType = response.headers()['content-type'] || '';
-                    if (!url.includes('/job_services.job_card.api_public.public.api.v1.API/')) return;
+                    const currentPageUrl = buildSearchUrl(effectiveSearch, pageNum);
+                    let pageHtml = '';
 
-                    stats.apiEndpoints.add(url);
-
-                    if (!contentType.includes('application/json')) return;
-
-                    const json = await response.json().catch(() => null);
-                    if (!json || typeof json !== 'object') return;
-                    if (Array.isArray(json.jobCards) && json.jobCards.length) {
-                        apiCapture.hydratedCards.push(...json.jobCards);
-                    }
-                } catch {
-                    // Ignore capture errors.
-                }
-            };
-
-            page.on('response', onResponse);
-
-            try {
-                await page.waitForLoadState('domcontentloaded', { timeout: 20000 }).catch(() => {});
-                await page.waitForTimeout(CONFIG.CONTENT_WAIT_MS);
-
-                const pageTitle = await page.title();
-                if (pageTitle.includes('Just a moment')) {
-                    await page.waitForTimeout(CONFIG.CLOUDFLARE_WAIT_MS);
-                }
-
-                await dismissPopups(page);
-                await page.waitForSelector('#js_variables', { timeout: 12000 }).catch(() => {});
-
-                const initialModel = await extractModelFromJsVariables(page);
-                const initialModelData = parseApiDataFromModel(initialModel);
-
-                let apiMaxPages = initialModelData.maxPages && initialModelData.maxPages > 0
-                    ? Math.min(initialModelData.maxPages, maxPages)
-                    : maxPages;
-
-                for (let pageNum = 1; pageNum <= apiMaxPages; pageNum += 1) {
-                    const remainingSlots = Number.isFinite(targetJobs)
-                        ? Math.max(targetJobs - totalScraped, 0)
-                        : Number.POSITIVE_INFINITY;
-
-                    if (remainingSlots === 0) {
-                        log.info(`Target reached on page ${pageNum - 1}`);
-                        return;
-                    }
-
-                    let modelData = null;
-                    let usedNavigationFallback = false;
-
-                    if (pageNum === 1) {
-                        modelData = initialModelData;
+                    if (pageNum > 1) {
+                        const navigationResponse = await page.goto(currentPageUrl, { waitUntil: 'domcontentloaded', timeout: 60000 });
+                        pageHtml = await navigationResponse?.text().catch(() => '');
+                        await page.waitForTimeout(CONFIG.CONTENT_WAIT_MS);
                     } else {
-                        const nextUrl = buildSearchUrl(effectiveSearch, pageNum);
-                        const fetched = await fetchModelFromSearchPageViaSession(page, nextUrl);
+                        pageHtml = await response?.text().catch(() => '');
+                    }
 
-                        if (fetched.ok && fetched.modelData) {
-                            modelData = fetched.modelData;
-                        } else {
-                            usedNavigationFallback = true;
-                            log.warning(`Session API pagination failed for page ${pageNum}, falling back to navigation`, {
-                                status: fetched.status,
-                                challenge: fetched.challenge,
-                                error: fetched.error,
-                            });
+                    if (!pageHtml) {
+                        pageHtml = await page.content();
+                    }
 
-                            await page.goto(nextUrl, { waitUntil: 'domcontentloaded', timeout: 60000 });
-                            await page.waitForTimeout(CONFIG.CONTENT_WAIT_MS);
-                            await dismissPopups(page);
-                            await page.waitForSelector('#js_variables', { timeout: 12000 }).catch(() => {});
-                            modelData = parseApiDataFromModel(await extractModelFromJsVariables(page));
+                    let pagePayload = extractSearchPayloadFromHtml(pageHtml);
+                    let challengeDetected = /just a moment|cloudflare/i.test(pageHtml);
+
+                    if ((!pagePayload || !pagePayload.jobKeys.length) && challengeDetected) {
+                        usedChallengeRetry = true;
+                        stats.challengeRetries += 1;
+                        log.warning(`Challenge page detected on page ${pageNum}. Retrying after wait.`);
+
+                        await page.waitForTimeout(CONFIG.CLOUDFLARE_WAIT_MS + 1200);
+                        const retryResponse = await page.goto(currentPageUrl, { waitUntil: 'domcontentloaded', timeout: 60000 });
+                        await page.waitForTimeout(CONFIG.CONTENT_WAIT_MS + 200);
+
+                        let retryHtml = await retryResponse?.text().catch(() => '');
+                        if (!retryHtml) {
+                            retryHtml = await page.content();
+                        }
+
+                        pagePayload = extractSearchPayloadFromHtml(retryHtml);
+                        challengeDetected = /just a moment|cloudflare/i.test(retryHtml);
+                    }
+
+                    if (pagePayload?.totalListings) {
+                        const pagesFromTotal = Math.ceil(pagePayload.totalListings / CONFIG.JOBS_PER_PAGE);
+                        if (Number.isFinite(pagesFromTotal) && pagesFromTotal > 0) {
+                            discoveredMaxPages = Math.min(discoveredMaxPages, pagesFromTotal);
                         }
                     }
 
-                    if (modelData?.maxPages && modelData.maxPages > 0) {
-                        apiMaxPages = Math.min(apiMaxPages, modelData.maxPages);
-                    }
-
-                    let records = [];
-                    let usedDomFallback = false;
-
-                    let { jobCards } = modelData || { jobCards: [] };
-                    const keyMap = new Map(asArray(modelData?.jobKeys).map((jobKey) => [jobKey.listingKey, jobKey]));
-
-                    if (!jobCards.length && asArray(modelData?.jobKeys).length) {
-                        const hydrated = await hydrateJobCardsViaApi(page, modelData.jobKeys);
-                        if (hydrated.length) {
-                            jobCards = hydrated;
-                        }
-                    }
-
-                    if (!jobCards.length && pageNum === 1 && apiCapture.hydratedCards.length) {
-                        jobCards = apiCapture.hydratedCards;
-                    }
-
-                    if (jobCards.length) {
+                    if (pagePayload?.jobKeys.length && Object.keys(pagePayload.jobKeysMap || {}).length) {
                         stats.apiPagesProcessed += 1;
+                        stats.apiEndpoints.add('/jobs-search:serializedJobCardsData');
 
-                        const pageCards = jobCards
-                            .filter((card) => card?.listingKey)
+                        const pageKeys = pagePayload.jobKeys
+                            .filter((jobKey) => pagePayload.jobKeysMap[jobKey.listingKey])
                             .slice(0, Number.isFinite(remainingSlots) ? remainingSlots : undefined);
 
-                        const jobKeysForDetails = pageCards
-                            .map((card) => ({
-                                listingKey: card.listingKey,
-                                matchId: card.matchId || keyMap.get(card.listingKey)?.matchId || '',
-                                bidTrackingData: keyMap.get(card.listingKey)?.bidTrackingData || card.bidTrackingData || '',
+                        const pageCards = pageKeys
+                            .map((jobKey) => pagePayload.jobKeysMap[jobKey.listingKey])
+                            .filter((jobCard) => jobCard?.listingKey);
+
+                        const jobKeysForDetails = pageKeys
+                            .map((jobKey) => ({
+                                listingKey: jobKey.listingKey,
+                                matchId: jobKey.matchId,
+                                bidTrackingData: jobKey.bidTrackingData || '',
                             }))
                             .filter((jobKey) => jobKey.listingKey && jobKey.matchId);
 
                         stats.detailCalls += jobKeysForDetails.length;
+                        stats.apiEndpoints.add('/job_services.job_card.api_public.public.api.v1.API/GetJobDetails');
+
                         const detailResult = await fetchListingDetailsBatchViaApi(page, {
                             jobKeys: jobKeysForDetails,
-                            placementId: modelData.placementId,
-                            impressionLotId: modelData.impressionLotId,
+                            placementId: pagePayload.placementId,
+                            impressionLotId: pagePayload.impressionLotId,
                         });
                         const { detailsByListing, failed } = detailResult;
                         stats.detailFailures += failed;
@@ -857,65 +909,79 @@ try {
                         });
                     }
 
-                    if (!records.length && pageNum === 1) {
-                        usedDomFallback = true;
-                        stats.domFallbackPages += 1;
-                        log.warning('API extraction returned no jobs on page 1. Falling back to DOM.');
-                        records = await extractJobsByDomFallback(page);
-                    }
-
-                    stats.pagesProcessed += 1;
-
-                    const uniqueRecords = [];
-                    for (const record of records) {
-                        const dedupeKey = record.listingKey
-                            || record.jobId
-                            || `${record.title || ''}|${record.company || ''}|${record.location || ''}`;
-
-                        if (!dedupeKey || seenJobIds.has(dedupeKey)) continue;
-                        seenJobIds.add(dedupeKey);
-                        uniqueRecords.push(record);
-                    }
-
-                    if (!uniqueRecords.length) {
-                        consecutiveEmpty += 1;
-                        log.info(`Page ${pageNum}: no new jobs`);
-                    } else {
-                        consecutiveEmpty = 0;
-                        const limitedRecords = Number.isFinite(remainingSlots)
-                            ? uniqueRecords.slice(0, remainingSlots)
-                            : uniqueRecords;
-
-                        const pushedCount = await pushRecordsSafely(limitedRecords);
-                        totalScraped += pushedCount;
-                        stats.jobsExtracted += pushedCount;
-                        let extractionMode = 'api-first';
-                        if (usedDomFallback) {
-                            extractionMode = 'dom-fallback';
-                        } else if (usedNavigationFallback) {
-                            extractionMode = 'api-first+nav-fallback';
-                        }
-
-                        log.info(`Page ${pageNum}: extracted ${pushedCount} jobs`, {
-                            total: totalScraped,
-                            mode: extractionMode,
+                    if (!records.length) {
+                        stats.emptyApiPages += 1;
+                        log.warning(`No API jobs extracted on page ${pageNum}`, {
+                            challenge: challengeDetected,
+                            usedChallengeRetry,
                         });
                     }
-
-                    if (Number.isFinite(targetJobs) && totalScraped >= targetJobs) {
-                        log.info(`Target reached on page ${pageNum}`);
-                        return;
-                    }
+                } catch (pageError) {
+                    stats.pagesProcessed += 1;
+                    consecutiveEmpty += 1;
+                    recordPageTiming(pageNum, pageStartedAt);
+                    log.warning(`Page ${pageNum} processing failed`, {
+                        error: pageError.message,
+                        consecutiveEmpty,
+                    });
 
                     if (consecutiveEmpty >= 2) {
                         log.info(`Stopping after ${consecutiveEmpty} empty pages`);
                         return;
                     }
 
-                    await page.waitForTimeout(60 + Math.floor(Math.random() * 120));
+                    continue;
                 }
-            } finally {
-                page.off('response', onResponse);
+
+                stats.pagesProcessed += 1;
+
+                const uniqueRecords = [];
+                for (const record of records) {
+                    const dedupeKey = record.listingKey
+                        || record.jobId
+                        || `${record.title || ''}|${record.company || ''}|${record.location || ''}`;
+
+                    if (!dedupeKey || seenJobIds.has(dedupeKey)) continue;
+                    seenJobIds.add(dedupeKey);
+                    uniqueRecords.push(record);
+                }
+
+                if (!uniqueRecords.length) {
+                    consecutiveEmpty += 1;
+                    log.info(`Page ${pageNum}: no new jobs`);
+                } else {
+                    consecutiveEmpty = 0;
+                    const limitedRecords = Number.isFinite(remainingSlots)
+                        ? uniqueRecords.slice(0, remainingSlots)
+                        : uniqueRecords;
+
+                    const pushedCount = await pushRecordsSafely(limitedRecords);
+                    totalScraped += pushedCount;
+                    stats.jobsExtracted += pushedCount;
+                    let extractionMode = 'next-flight-only';
+                    if (usedChallengeRetry) {
+                        extractionMode = 'next-flight+challenge-retry';
+                    }
+
+                    log.info(`Page ${pageNum}: extracted ${pushedCount} jobs`, {
+                        total: totalScraped,
+                        mode: extractionMode,
+                    });
+                }
+
+                recordPageTiming(pageNum, pageStartedAt);
+
+                if (Number.isFinite(targetJobs) && totalScraped >= targetJobs) {
+                    log.info(`Target reached on page ${pageNum}`);
+                    return;
+                }
+
+                if (consecutiveEmpty >= 2) {
+                    log.info(`Stopping after ${consecutiveEmpty} empty pages`);
+                    return;
+                }
+
+                await page.waitForTimeout(40 + Math.floor(Math.random() * 80));
             }
         },
 
@@ -930,14 +996,20 @@ try {
 
     const durationSeconds = Math.round((Date.now() - stats.startTime) / 1000);
     const jobsPerSecond = durationSeconds > 0 ? Number((stats.jobsExtracted / durationSeconds).toFixed(3)) : 0;
+    const avgPageMs = stats.pagesProcessed > 0
+        ? Math.round(stats.totalPageMs / stats.pagesProcessed)
+        : 0;
 
     await Actor.setValue('statistics', {
         jobs: totalScraped,
         pagesProcessed: stats.pagesProcessed,
         apiPagesProcessed: stats.apiPagesProcessed,
-        domFallbackPages: stats.domFallbackPages,
+        challengeRetries: stats.challengeRetries,
+        emptyApiPages: stats.emptyApiPages,
         detailCalls: stats.detailCalls,
         detailFailures: stats.detailFailures,
+        slowPages: stats.slowPages,
+        avgPageMs,
         durationSeconds,
         jobsPerSecond,
         apiEndpoints: Array.from(stats.apiEndpoints),
@@ -948,9 +1020,12 @@ try {
         jobs: totalScraped,
         pagesProcessed: stats.pagesProcessed,
         apiPagesProcessed: stats.apiPagesProcessed,
-        domFallbackPages: stats.domFallbackPages,
+        challengeRetries: stats.challengeRetries,
+        emptyApiPages: stats.emptyApiPages,
         detailCalls: stats.detailCalls,
         detailFailures: stats.detailFailures,
+        slowPages: stats.slowPages,
+        avgPageMs,
         durationSeconds,
     });
 } catch (error) {

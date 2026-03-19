@@ -10,7 +10,7 @@
     ],
     "meta": {
         "templateId": "ziprecruiter-jobs-scraper",
-        "generatedBy": "GPT-5 Codex"
+        "generatedBy": "GPT-5.3-Codex"
     },
     "input": "./input_schema.json",
     "output": "./output_schema.json",

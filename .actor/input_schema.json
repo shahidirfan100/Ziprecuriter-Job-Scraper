@@ -8,7 +8,7 @@
             "type": "string",
             "description": "Direct ZipRecruiter search URL to scrape from. If provided, other search parameters will be ignored. Example: https://www.ziprecruiter.com/jobs-search?location=New+York%2C+NY&search=software+engineer",
             "editor": "textfield",
-            "prefill": "https://www.ziprecruiter.com/jobs-search?location=New+York%2C+NY&search=software+engineer"
+            "prefill": "https://www.ziprecruiter.com/jobs-search?location=United+States&search=software+engineer"
         },
         "searchQuery": {
             "title": "Search Query / Keywords",
@@ -23,8 +23,8 @@
             "type": "string",
             "description": "Location to search for jobs (e.g., 'New York, NY', 'California', 'Remote'). Recommended for best results.",
             "editor": "textfield",
-            "default": "New York, NY",
-            "prefill": "New York, NY"
+            "default": "United States",
+            "prefill": "United States"
         },
         "maxJobs": {
             "title": "Maximum Jobs",
