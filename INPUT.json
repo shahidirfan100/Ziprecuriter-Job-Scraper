@@ -3,8 +3,13 @@
   "searchQuery": "software engineer",
   "location": "United States",
   "maxJobs": 20,
+  "maxPages": 10,
+  "scrapeMode": "listing_only",
   "daysBack": "any",
   "proxyConfiguration": {
-    "useApifyProxy": true
+    "useApifyProxy": true,
+    "apifyProxyGroups": [
+      "RESIDENTIAL"
+    ]
   }
 }

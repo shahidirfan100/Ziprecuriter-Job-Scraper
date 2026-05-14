@@ -31,18 +31,29 @@
             "type": "integer",
             "description": "Maximum number of job listings to scrape (0 = unlimited). Default is 20.",
             "default": 20,
-            "prefill": 20,
-            "minimum": 0,
-            "maximum": 10000
+            "prefill": 20
         },
         "maxPages": {
             "title": "Maximum Pages",
             "type": "integer",
             "description": "Maximum number of result pages to scan. Used as a safety cap, especially when maxJobs is 0 (unlimited).",
-            "default": 50,
-            "prefill": 50,
-            "minimum": 1,
-            "maximum": 200
+            "default": 10,
+            "prefill": 10
+        },
+        "scrapeMode": {
+            "title": "Scrape Mode",
+            "type": "string",
+            "description": "Choose listing-only for fastest runs. Detail mode fetches extra per-job data but is slower.",
+            "default": "listing_only",
+            "prefill": "listing_only",
+            "enum": [
+                "listing_only",
+                "listing_with_details"
+            ],
+            "enumTitles": [
+                "Listing Only (Fast)",
+                "Listing + Details (Slow)"
+            ]
         },
         "daysBack": {
             "title": "Posted Within (Days)",
@@ -73,7 +84,11 @@
             "description": "Proxy settings for bypassing anti-bot protection. Residential proxies highly recommended for ZipRecruiter.",
             "editor": "proxy",
             "default": {
-                "useApifyProxy": true
+                "useApifyProxy": true,
+                "apifyProxyGroups": [
+                    "RESIDENTIAL"
+                ],
+                "apifyProxyCountry": "US"
             }
         }
     },

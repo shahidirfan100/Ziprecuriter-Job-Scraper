@@ -8,12 +8,12 @@
     },
     "dependencies": {
         "@crawlee/playwright": "^3.16.0",
-        "apify": "^3.6.0",
-        "camoufox-js": "^0.7.0",
-        "playwright": "1.58.2"
+        "apify": "^3.7.2",
+        "camoufox-js": "^0.10.2",
+        "playwright": "1.59.1"
     },
     "devDependencies": {
-        "@apify/eslint-config": "^1.0.0",
+        "@apify/eslint-config": "^2.0.0",
         "eslint": "^9.29.0",
         "eslint-config-prettier": "^10.1.5",
         "prettier": "^3.5.3"
@@ -24,8 +24,7 @@
         "format:check": "prettier --check .",
         "lint": "eslint",
         "lint:fix": "eslint --fix",
-        "test": "echo \"Error: oops, the Actor has no tests yet, sad!\" && exit 1",
-        "postinstall": "npx camoufox-js fetch"
+        "test": "echo \"Error: oops, the Actor has no tests yet, sad!\" && exit 1"
     },
     "author": "Shahid Irfan",
     "license": "Apache-2.0",

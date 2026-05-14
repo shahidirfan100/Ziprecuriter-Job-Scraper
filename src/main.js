@@ -1,3 +1,5 @@
+import { readFile } from 'node:fs/promises';
+
 import { PlaywrightCrawler } from '@crawlee/playwright';
 import { Actor, log } from 'apify';
 import { launchOptions as camoufoxLaunchOptions } from 'camoufox-js';
@@ -6,14 +8,17 @@ import { firefox } from 'playwright';
 await Actor.init();
 
 const CONFIG = {
-    CLOUDFLARE_WAIT_MS: 2200,
-    CONTENT_WAIT_MS: 180,
+    CLOUDFLARE_WAIT_MS: 1400,
+    CONTENT_WAIT_MS: 60,
     JOBS_PER_PAGE: 20,
     DEFAULT_MAX_PAGES: 50,
     MAX_PAGES_HARD_LIMIT: 200,
-    DETAIL_CONCURRENCY: 4,
+    DETAIL_CONCURRENCY: 8,
+    DETAIL_RETRIES: 2,
+    MAX_EMPTY_PAGES: 3,
+    SEARCH_FETCH_TIMEOUT_MS: 45000,
+    DETAIL_ENRICHMENT_LIMIT: 60,
 };
-const DEFAULT_SEARCH_QUERY = 'software engineer';
 
 const stats = {
     pagesProcessed: 0,
@@ -32,6 +37,9 @@ const stats = {
 const seenJobIds = new Set();
 
 const asArray = (value) => (Array.isArray(value) ? value : []);
+const sleep = (ms) => new Promise((resolve) => {
+    setTimeout(resolve, ms);
+});
 
 const NULLABLE_NUMBER_FIELDS = [
     'salaryMin',
@@ -47,6 +55,95 @@ const safeJsonParse = (value, fallback = null) => {
         return fallback;
     }
 };
+
+const INPUT_KEYS = ['searchUrl', 'searchQuery', 'location', 'maxJobs', 'maxPages', 'daysBack', 'proxyConfiguration'];
+
+function hasValue(value) {
+    if (value === null || value === undefined) return false;
+    if (typeof value === 'string') return value.trim().length > 0;
+    if (Array.isArray(value)) return value.length > 0;
+    if (typeof value === 'object') return Object.keys(value).length > 0;
+    return true;
+}
+
+async function readJsonFileIfExists(path, fallback = {}) {
+    try {
+        const content = await readFile(path, 'utf8');
+        return safeJsonParse(content, fallback);
+    } catch {
+        return fallback;
+    }
+}
+
+function getSchemaFallback(schema, key) {
+    const field = schema?.properties?.[key];
+    if (!field || typeof field !== 'object') return undefined;
+    if (field.prefill !== undefined) return field.prefill;
+    if (field.default !== undefined) return field.default;
+    return undefined;
+}
+
+async function resolveInputWithFallbacks() {
+    const runtimeInput = (await Actor.getInput()) || {};
+    const schema = await readJsonFileIfExists('.actor/input_schema.json', {});
+    const localInput = await readJsonFileIfExists('INPUT.json', {});
+
+    const userProvidedAny = Object.values(runtimeInput).some((value) => hasValue(value));
+    const runtimeHasSearchFilters = hasValue(runtimeInput.searchQuery) || hasValue(runtimeInput.location);
+    const runtimeHasSearchUrl = hasValue(runtimeInput.searchUrl);
+    const resolvedInput = { ...runtimeInput };
+    const fallbackSources = {};
+
+    for (const key of INPUT_KEYS) {
+        if (hasValue(resolvedInput[key])) continue;
+
+        // If user explicitly provided query/location, never backfill searchUrl from schema/INPUT.
+        if (key === 'searchUrl' && runtimeHasSearchFilters && !runtimeHasSearchUrl) continue;
+
+        const schemaFallback = getSchemaFallback(schema, key);
+        if (hasValue(schemaFallback)) {
+            resolvedInput[key] = schemaFallback;
+            fallbackSources[key] = 'input_schema';
+            continue;
+        }
+
+        if (hasValue(localInput[key])) {
+            resolvedInput[key] = localInput[key];
+            fallbackSources[key] = 'INPUT.json';
+        }
+    }
+
+    return { resolvedInput, fallbackSources, userProvidedAny };
+}
+
+function normalizeProxyInput(proxyInput) {
+    if (!proxyInput || typeof proxyInput !== 'object') {
+        return {
+            useApifyProxy: true,
+            apifyProxyGroups: ['RESIDENTIAL'],
+            apifyProxyCountry: 'US',
+        };
+    }
+
+    const normalized = { ...proxyInput };
+
+    if (normalized.useApifyProxy) {
+        if (!Array.isArray(normalized.apifyProxyGroups) || normalized.apifyProxyGroups.length === 0) {
+            normalized.apifyProxyGroups = ['RESIDENTIAL'];
+        }
+
+        const country = normalized.apifyProxyCountry || normalized.countryCode;
+        if (!country) {
+            normalized.apifyProxyCountry = 'US';
+            normalized.countryCode = 'US';
+        } else {
+            normalized.apifyProxyCountry = country;
+            normalized.countryCode = country;
+        }
+    }
+
+    return normalized;
+}
 
 const NEXT_FLIGHT_PUSH_REGEX = /self\.__next_f\.push\(\[1,\\"([\s\S]*?)\\"\]\)/g;
 
@@ -358,11 +455,11 @@ function normalizeTypedNames(items) {
         .map((name) => name.trim());
 }
 
-    function normalizeTypedLabels(items) {
-        return normalizeTypedNames(items)
+function normalizeTypedLabels(items) {
+    return normalizeTypedNames(items)
         .map((name) => toReadableEnumName(name))
         .filter(Boolean);
-    }
+}
 
 function normalizeInputString(value) {
     if (typeof value !== 'string') return '';
@@ -396,10 +493,10 @@ function sanitizeRecordForDataset(record) {
 
     for (const [key, value] of Object.entries(sanitized)) {
         if (Array.isArray(value)) {
-            const primitiveItems = value
+            const primitiveItems = [...new Set(value
                 .filter((item) => ['string', 'number', 'boolean'].includes(typeof item))
                 .map((item) => String(item).trim())
-                .filter(Boolean);
+                .filter((item) => item && !/^(null|undefined|n\/a)$/i.test(item)))];
 
             if (!primitiveItems.length) {
                 delete sanitized[key];
@@ -414,8 +511,18 @@ function sanitizeRecordForDataset(record) {
             continue;
         }
 
-        if (value === null || value === undefined || value === '') {
+        if (
+            value === null
+            || value === undefined
+            || value === ''
+            || (typeof value === 'string' && /^(null|undefined|n\/a)$/i.test(value.trim()))
+        ) {
             delete sanitized[key];
+            continue;
+        }
+
+        if (typeof value === 'string') {
+            sanitized[key] = value.trim();
         }
     }
 
@@ -485,26 +592,50 @@ function buildSearchUrl(input, pageNum = 1) {
     return url.toString();
 }
 
-async function dismissPopups(page) {
-    try {
-        const selectors = [
-            'button[aria-label="Close"]',
-            'button:has-text("Not now")',
-            'button:has-text("No Thanks")',
-        ];
-        for (const selector of selectors) {
-            const button = page.locator(selector).first();
-            if (await button.count()) {
-                await button.click({ timeout: 3000 }).catch(() => {});
-            }
-        }
-        await page.keyboard.press('Escape').catch(() => {});
-    } catch {
-        // Ignore popup failures.
-    }
+function isChallengePage(html) {
+    return /just a moment|cloudflare|verify you are human|challenge/i.test(html || '');
 }
 
-async function fetchListingDetailsBatchViaApi(page, options) {
+async function fetchSearchPageHtml(page, pageUrl, fallbackResponse = null, options = {}) {
+    const { allowNavigationFallback = true } = options;
+    let html = '';
+    let mode = 'initial-response';
+
+    if (fallbackResponse) {
+        html = await fallbackResponse.text().catch(() => '');
+    }
+
+    if (!html) {
+        const apiResponse = await page.context().request.get(pageUrl, {
+            failOnStatusCode: false,
+            timeout: CONFIG.SEARCH_FETCH_TIMEOUT_MS,
+            headers: {
+                accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+                'accept-language': 'en-US,en;q=0.9',
+            },
+        });
+
+        html = await apiResponse.text().catch(() => '');
+        mode = 'context-request';
+    }
+
+    if ((!html || isChallengePage(html)) && allowNavigationFallback) {
+        const navResponse = await page.goto(pageUrl, {
+            waitUntil: 'domcontentloaded',
+            timeout: 60000,
+        });
+        html = await navResponse?.text().catch(() => '');
+        mode = 'navigation-fallback';
+    }
+
+    if (!html) {
+        html = await page.content();
+    }
+
+    return { html, mode };
+}
+
+async function fetchListingDetailsBatchViaApi(page, apiRequestContext, options) {
     const {
         jobKeys,
         placementId,
@@ -523,12 +654,14 @@ async function fetchListingDetailsBatchViaApi(page, options) {
         return { detailsByListing: new Map(), failed: validJobKeys.length };
     }
 
-    const results = await page.evaluate(async ({ keys, placementIdValue, impressionLotIdValue, maxConcurrency }) => {
-        const endpoint = '/job_services.job_card.api_public.public.api.v1.API/GetJobDetails';
-        const collected = [];
+    const endpointPath = '/job_services.job_card.api_public.public.api.v1.API/GetJobDetails';
+    const endpointUrl = `https://www.ziprecruiter.com${endpointPath}`;
+
+    const collected = await page.evaluate(async ({ keys, placementIdValue, impressionLotIdValue, maxConcurrency, endpoint }) => {
+        const results = [];
         let cursor = 0;
 
-        async function runWorker() {
+        async function worker() {
             while (cursor < keys.length) {
                 const index = cursor;
                 cursor += 1;
@@ -548,52 +681,110 @@ async function fetchListingDetailsBatchViaApi(page, options) {
                     const response = await fetch(endpoint, {
                         method: 'POST',
                         headers: {
-                            'content-type': 'application/json',
                             accept: 'application/json',
+                            'content-type': 'application/json',
                         },
                         credentials: 'include',
                         body: JSON.stringify(payload),
                     });
 
-                    if (!response.ok) {
-                        collected.push({
-                            listingKey: key.listingKey,
-                            ok: false,
-                            status: response.status,
-                        });
-                        continue;
-                    }
-
-                    const data = await response.json().catch(() => ({}));
-                    collected.push({
+                    const json = await response.json().catch(() => ({}));
+                    results.push({
                         listingKey: key.listingKey,
-                        ok: true,
+                        ok: response.ok && Boolean(json?.jobDetails),
                         status: response.status,
-                        jobDetails: data?.jobDetails || null,
+                        jobDetails: json?.jobDetails || null,
                     });
                 } catch {
-                    collected.push({
+                    results.push({
                         listingKey: key.listingKey,
                         ok: false,
                         status: 0,
+                        jobDetails: null,
                     });
                 }
             }
         }
 
-        await Promise.all(Array.from({ length: maxConcurrency }, () => runWorker()));
-        return collected;
+        await Promise.all(Array.from({ length: maxConcurrency }, () => worker()));
+        return results;
     }, {
         keys: validJobKeys,
         placementIdValue: placementId,
         impressionLotIdValue: impressionLotId,
-        maxConcurrency: CONFIG.DETAIL_CONCURRENCY,
+        maxConcurrency: Math.min(CONFIG.DETAIL_CONCURRENCY, validJobKeys.length),
+        endpoint: endpointPath,
     });
+
+    const failedKeys = collected
+        .filter((item) => !item.ok)
+        .map((item) => validJobKeys.find((jobKey) => jobKey.listingKey === item.listingKey))
+        .filter(Boolean);
+
+    // Auto-heal fallback for failed detail calls using BrowserContext API requests.
+    if (failedKeys.length > 0) {
+        for (const failedKey of failedKeys) {
+            let recovered = null;
+            let status = 0;
+
+            for (let attempt = 1; attempt <= CONFIG.DETAIL_RETRIES + 1; attempt += 1) {
+                const payload = {
+                    jobKey: {
+                        listingKey: failedKey.listingKey,
+                        matchId: failedKey.matchId,
+                        bidTrackingData: failedKey.bidTrackingData || '',
+                    },
+                    placementId,
+                    impressionLotId,
+                };
+
+                try {
+                    const response = await apiRequestContext.post(endpointUrl, {
+                        data: payload,
+                        failOnStatusCode: false,
+                        timeout: CONFIG.SEARCH_FETCH_TIMEOUT_MS,
+                        headers: {
+                            accept: 'application/json',
+                            'content-type': 'application/json',
+                            referer: 'https://www.ziprecruiter.com/',
+                        },
+                    });
+
+                    status = response.status();
+                    if (status >= 200 && status < 300) {
+                        const json = await response.json().catch(() => ({}));
+                        if (json?.jobDetails) {
+                            recovered = json.jobDetails;
+                            break;
+                        }
+                    }
+                } catch {
+                    // Try next retry slot.
+                }
+
+                if (attempt <= CONFIG.DETAIL_RETRIES) {
+                    await sleep(100 * attempt);
+                }
+            }
+
+            if (recovered) {
+                const index = collected.findIndex((item) => item.listingKey === failedKey.listingKey);
+                if (index >= 0) {
+                    collected[index] = {
+                        listingKey: failedKey.listingKey,
+                        ok: true,
+                        status,
+                        jobDetails: recovered,
+                    };
+                }
+            }
+        }
+    }
 
     const detailsByListing = new Map();
     let failed = 0;
 
-    for (const result of results) {
+    for (const result of collected) {
         if (result?.ok && result.jobDetails) {
             detailsByListing.set(result.listingKey, result.jobDetails);
         } else {
@@ -689,26 +880,31 @@ function normalizeJobRecord(card, detail, context) {
 }
 
 try {
-    const input = (await Actor.getInput()) || {};
+    const { resolvedInput: input, fallbackSources, userProvidedAny } = await resolveInputWithFallbacks();
 
     const rawSearchUrl = normalizeInputString(input.searchUrl);
     const rawSearchQuery = normalizeInputString(input.searchQuery);
     const rawLocation = normalizeInputString(input.location);
 
-    const hasExplicitFilters = Boolean(rawSearchQuery || rawLocation);
     const hasSearchUrl = Boolean(rawSearchUrl);
-    const useSearchUrl = hasSearchUrl && !hasExplicitFilters;
-    const useDefaultQuery = !useSearchUrl && !rawSearchQuery && !rawLocation;
+    const hasSearchFilters = Boolean(rawSearchQuery || rawLocation);
+    const useSearchUrl = hasSearchUrl && !hasSearchFilters;
 
     const effectiveSearch = {
         searchUrl: useSearchUrl ? rawSearchUrl : '',
-        searchQuery: rawSearchQuery || (useDefaultQuery ? DEFAULT_SEARCH_QUERY : ''),
-        location: rawLocation,
+        searchQuery: useSearchUrl ? '' : rawSearchQuery,
+        location: useSearchUrl ? '' : rawLocation,
         daysBack: input.daysBack,
     };
 
+    if (!effectiveSearch.searchUrl && !effectiveSearch.searchQuery && !effectiveSearch.location) {
+        throw new Error('Missing search input. Provide searchUrl, searchQuery, or location.');
+    }
+
     const maxJobsInput = Number(input.maxJobs ?? 20);
     const targetJobs = maxJobsInput > 0 ? maxJobsInput : Number.POSITIVE_INFINITY;
+    const scrapeMode = normalizeInputString(input.scrapeMode) || 'listing_only';
+    const includeJobDetails = scrapeMode === 'listing_with_details';
 
     const inferredPagesFromTarget = Number.isFinite(targetJobs)
         ? Math.ceil(targetJobs / CONFIG.JOBS_PER_PAGE) + 2
@@ -719,22 +915,28 @@ try {
         CONFIG.MAX_PAGES_HARD_LIMIT,
     );
 
-    const proxyConfiguration = await Actor.createProxyConfiguration(
-        input.proxyConfiguration || { useApifyProxy: true, apifyProxyGroups: ['RESIDENTIAL'] },
-    );
-
-    const proxyUrl = await proxyConfiguration?.newUrl();
+    const normalizedProxyConfig = normalizeProxyInput(input.proxyConfiguration);
+    const proxyConfiguration = await Actor.createProxyConfiguration(normalizedProxyConfig);
 
     log.info('Starting ZipRecruiter actor in API-only search payload mode', {
         searchQuery: effectiveSearch.searchQuery || null,
         location: effectiveSearch.location || null,
         usingSearchUrl: Boolean(effectiveSearch.searchUrl),
+        searchMode: effectiveSearch.searchUrl ? 'searchUrl' : 'queryOrLocation',
         maxJobs: Number.isFinite(targetJobs) ? targetJobs : 0,
         maxPages,
+        scrapeMode,
+        includeJobDetails,
+        userProvidedInput: userProvidedAny,
+        fallbackSources,
+        proxyCountry: normalizedProxyConfig.apifyProxyCountry || normalizedProxyConfig.countryCode || null,
+        proxyGroups: normalizedProxyConfig.apifyProxyGroups || null,
     });
 
     let totalScraped = 0;
     let consecutiveEmpty = 0;
+    let challengeSolvedInSession = false;
+    let forceNavigationNextPage = false;
 
     const crawler = new PlaywrightCrawler({
         proxyConfiguration,
@@ -746,22 +948,17 @@ try {
         useSessionPool: true,
         sessionPoolOptions: {
             maxPoolSize: 20,
+            blockedStatusCodes: [],
         },
 
         launchContext: {
             launcher: firefox,
             launchOptions: await camoufoxLaunchOptions({
                 headless: true,
-                geoip: true,
+                geoip: false,
                 os: 'windows',
                 locale: 'en-US',
-                ...(proxyUrl ? { proxy: proxyUrl } : {}),
-                screen: {
-                    minWidth: 1280,
-                    maxWidth: 1920,
-                    minHeight: 720,
-                    maxHeight: 1080,
-                },
+                humanize: false,
             }),
         },
 
@@ -770,23 +967,8 @@ try {
                 await page.route('**/*', async (route) => {
                     const request = route.request();
                     const resourceType = request.resourceType();
-                    const url = request.url();
 
                     if (resourceType === 'image' || resourceType === 'font' || resourceType === 'media') {
-                        await route.abort();
-                        return;
-                    }
-
-                    if (
-                        url.includes('google-analytics.com')
-                        || url.includes('googletagmanager.com')
-                        || url.includes('doubleclick.net')
-                        || url.includes('hotjar.com')
-                        || url.includes('sentry.io')
-                        || url.includes('ketchcdn.com')
-                        || url.includes('featureassets.org')
-                        || url.includes('prodregistryv2.org')
-                    ) {
                         await route.abort();
                         return;
                     }
@@ -826,39 +1008,61 @@ try {
 
                 try {
                     const currentPageUrl = buildSearchUrl(effectiveSearch, pageNum);
-                    let pageHtml = '';
-
-                    if (pageNum > 1) {
-                        const navigationResponse = await page.goto(currentPageUrl, { waitUntil: 'domcontentloaded', timeout: 60000 });
-                        pageHtml = await navigationResponse?.text().catch(() => '');
-                        await page.waitForTimeout(CONFIG.CONTENT_WAIT_MS);
-                    } else {
-                        pageHtml = await response?.text().catch(() => '');
-                    }
-
-                    if (!pageHtml) {
-                        pageHtml = await page.content();
-                    }
-
+                    const pageHtmlResult = await fetchSearchPageHtml(
+                        page,
+                        currentPageUrl,
+                        pageNum === 1 ? response : null,
+                        { allowNavigationFallback: pageNum === 1 || !challengeSolvedInSession || forceNavigationNextPage },
+                    );
+                    let pageHtml = pageHtmlResult.html;
                     let pagePayload = extractSearchPayloadFromHtml(pageHtml);
-                    let challengeDetected = /just a moment|cloudflare/i.test(pageHtml);
+                    let challengeDetected = isChallengePage(pageHtml);
 
                     if ((!pagePayload || !pagePayload.jobKeys.length) && challengeDetected) {
                         usedChallengeRetry = true;
                         stats.challengeRetries += 1;
                         log.warning(`Challenge page detected on page ${pageNum}. Retrying after wait.`);
 
-                        await page.waitForTimeout(CONFIG.CLOUDFLARE_WAIT_MS + 1200);
-                        const retryResponse = await page.goto(currentPageUrl, { waitUntil: 'domcontentloaded', timeout: 60000 });
-                        await page.waitForTimeout(CONFIG.CONTENT_WAIT_MS + 200);
-
-                        let retryHtml = await retryResponse?.text().catch(() => '');
-                        if (!retryHtml) {
-                            retryHtml = await page.content();
-                        }
+                        await page.waitForTimeout(CONFIG.CLOUDFLARE_WAIT_MS);
+                        const retryResult = await fetchSearchPageHtml(
+                            page,
+                            currentPageUrl,
+                            null,
+                            { allowNavigationFallback: true },
+                        );
+                        const retryHtml = retryResult.html;
 
                         pagePayload = extractSearchPayloadFromHtml(retryHtml);
-                        challengeDetected = /just a moment|cloudflare/i.test(retryHtml);
+                        challengeDetected = isChallengePage(retryHtml);
+                        pageHtml = retryHtml;
+                    }
+
+                    // Adaptive recovery: when API-context fetch gets challenged on later pages,
+                    // refresh clearance using a real browser navigation and continue.
+                    if ((!pagePayload || !pagePayload.jobKeys.length) && challengeDetected && pageNum > 1) {
+                        forceNavigationNextPage = true;
+                        log.warning(`Challenge persisted on page ${pageNum}. Refreshing clearance via browser navigation.`);
+
+                        const recoveryResult = await fetchSearchPageHtml(
+                            page,
+                            currentPageUrl,
+                            null,
+                            { allowNavigationFallback: true },
+                        );
+
+                        const recoveryHtml = recoveryResult.html;
+                        const recoveryPayload = extractSearchPayloadFromHtml(recoveryHtml);
+                        const recoveryChallenge = isChallengePage(recoveryHtml);
+
+                        if (recoveryPayload?.jobKeys?.length && !recoveryChallenge) {
+                            pagePayload = recoveryPayload;
+                            challengeDetected = false;
+                            challengeSolvedInSession = true;
+                            forceNavigationNextPage = false;
+                            await page.waitForTimeout(250);
+                        }
+                    } else if (!challengeDetected) {
+                        forceNavigationNextPage = false;
                     }
 
                     if (pagePayload?.totalListings) {
@@ -869,6 +1073,8 @@ try {
                     }
 
                     if (pagePayload?.jobKeys.length && Object.keys(pagePayload.jobKeysMap || {}).length) {
+                        challengeSolvedInSession = true;
+                        forceNavigationNextPage = false;
                         stats.apiPagesProcessed += 1;
                         stats.apiEndpoints.add('/jobs-search:serializedJobCardsData');
 
@@ -888,16 +1094,24 @@ try {
                             }))
                             .filter((jobKey) => jobKey.listingKey && jobKey.matchId);
 
-                        stats.detailCalls += jobKeysForDetails.length;
-                        stats.apiEndpoints.add('/job_services.job_card.api_public.public.api.v1.API/GetJobDetails');
+                        let detailsByListing = new Map();
+                        const remainingDetailBudget = Math.max(CONFIG.DETAIL_ENRICHMENT_LIMIT - stats.detailCalls, 0);
+                        const detailKeysForThisPage = remainingDetailBudget > 0
+                            ? jobKeysForDetails.slice(0, remainingDetailBudget)
+                            : [];
 
-                        const detailResult = await fetchListingDetailsBatchViaApi(page, {
-                            jobKeys: jobKeysForDetails,
-                            placementId: pagePayload.placementId,
-                            impressionLotId: pagePayload.impressionLotId,
-                        });
-                        const { detailsByListing, failed } = detailResult;
-                        stats.detailFailures += failed;
+                        if (includeJobDetails && detailKeysForThisPage.length > 0) {
+                            stats.detailCalls += detailKeysForThisPage.length;
+                            stats.apiEndpoints.add('/job_services.job_card.api_public.public.api.v1.API/GetJobDetails');
+
+                            const detailResult = await fetchListingDetailsBatchViaApi(page, page.context().request, {
+                                jobKeys: detailKeysForThisPage,
+                                placementId: pagePayload.placementId,
+                                impressionLotId: pagePayload.impressionLotId,
+                            });
+                            detailsByListing = detailResult.detailsByListing;
+                            stats.detailFailures += detailResult.failed;
+                        }
 
                         records = pageCards.map((card) => {
                             const detail = detailsByListing.get(card.listingKey) || null;
@@ -914,6 +1128,7 @@ try {
                         log.warning(`No API jobs extracted on page ${pageNum}`, {
                             challenge: challengeDetected,
                             usedChallengeRetry,
+                            htmlMode: pageHtmlResult.mode,
                         });
                     }
                 } catch (pageError) {
@@ -925,7 +1140,7 @@ try {
                         consecutiveEmpty,
                     });
 
-                    if (consecutiveEmpty >= 2) {
+                    if (consecutiveEmpty >= CONFIG.MAX_EMPTY_PAGES) {
                         log.info(`Stopping after ${consecutiveEmpty} empty pages`);
                         return;
                     }
@@ -938,6 +1153,7 @@ try {
                 const uniqueRecords = [];
                 for (const record of records) {
                     const dedupeKey = record.listingKey
+                        || record.url
                         || record.jobId
                         || `${record.title || ''}|${record.company || ''}|${record.location || ''}`;
 
@@ -976,17 +1192,17 @@ try {
                     return;
                 }
 
-                if (consecutiveEmpty >= 2) {
+                if (consecutiveEmpty >= CONFIG.MAX_EMPTY_PAGES) {
                     log.info(`Stopping after ${consecutiveEmpty} empty pages`);
                     return;
                 }
 
-                await page.waitForTimeout(40 + Math.floor(Math.random() * 80));
+                await page.waitForTimeout(15 + Math.floor(Math.random() * 35));
             }
         },
 
-        failedRequestHandler({ request, error }) {
-            log.error(`Request failed for page ${request.userData.pageNum || 1}: ${error.message}`);
+        failedRequestHandler({ request }, error) {
+            log.error(`Request failed for page ${request.userData.pageNum || 1}: ${error?.message || 'Unknown error'}`);
         },
     });
 

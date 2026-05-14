@@ -2,7 +2,7 @@
     "actorSpecification": 1,
     "name": "ziprecruiter-jobs-scraper",
     "title": "ZipRecruiter Jobs Scraper",
-    "description": "Extract comprehensive job listings from ZipRecruiter with advanced search capabilities. Get structured job data including titles, companies, locations, salaries, job types, descriptions, and application links. Perfect for job market analysis, recruitment automation, and employment research with multiple extraction strategies.",
+    "description": "Extract job listings from ZipRecruiter with flexible search options. Get structured data including titles, companies, locations, salaries, job types, descriptions, and apply links for job market analysis, recruitment automation, and research workflows.",
     "version": "1.0",
     "categories": [
         "BUSINESS",
@@ -10,7 +10,7 @@
     ],
     "meta": {
         "templateId": "ziprecruiter-jobs-scraper",
-        "generatedBy": "GPT-5.3-Codex"
+        "generatedBy": "GPT-5.5"
     },
     "input": "./input_schema.json",
     "output": "./output_schema.json",

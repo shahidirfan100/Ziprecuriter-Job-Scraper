@@ -36,9 +36,10 @@ Feed datasets into warehouse or BI tools for recurring reporting. Monitor role d
 |-----------|------|----------|---------|-------------|
 | `searchUrl` | String | No | — | Direct ZipRecruiter search URL. When provided, it overrides search query and location fields. |
 | `searchQuery` | String | No | `"software engineer"` | Keywords or job title to search for. Required when `searchUrl` is not provided. |
-| `location` | String | No | `"New York, NY"` | Target location for search results. |
+| `location` | String | No | `"United States"` | Target location for search results. |
 | `maxJobs` | Integer | No | `20` | Maximum number of jobs to collect. Use `0` for unlimited until other limits are reached. |
-| `maxPages` | Integer | No | `50` | Maximum number of result pages to process. |
+| `maxPages` | Integer | No | `10` | Maximum number of result pages to process. |
+| `scrapeMode` | String | No | `"listing_only"` | `listing_only` for fastest extraction, or `listing_with_details` for richer detail fields (slower). |
 | `daysBack` | String | No | `"any"` | Posting recency filter. Allowed values: `any`, `1`, `3`, `7`, `14`, `30`. |
 | `proxyConfiguration` | Object | No | Residential proxy preset | Proxy configuration for reliable collection. |
 
@@ -108,7 +109,8 @@ Collect software engineering jobs in New York:
 {
     "searchQuery": "software engineer",
     "location": "New York, NY",
-    "maxJobs": 50
+    "maxJobs": 50,
+    "scrapeMode": "listing_only"
 }
 ```
 
@@ -120,7 +122,8 @@ Use a ZipRecruiter search URL directly:
 {
     "searchUrl": "https://www.ziprecruiter.com/jobs-search?search=data+analyst&location=Remote",
     "maxJobs": 100,
-    "maxPages": 20
+    "maxPages": 20,
+    "scrapeMode": "listing_only"
 }
 ```
 
@@ -135,9 +138,11 @@ Focus on fresh jobs and use proxy settings:
     "daysBack": "7",
     "maxJobs": 200,
     "maxPages": 50,
+    "scrapeMode": "listing_with_details",
     "proxyConfiguration": {
         "useApifyProxy": true,
-        "apifyProxyGroups": ["RESIDENTIAL"]
+        "apifyProxyGroups": ["RESIDENTIAL"],
+        "apifyProxyCountry": "US"
     }
 }
 ```
